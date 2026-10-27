@@ -187,4 +187,31 @@ class AllocationFreeTest {
             sink += manifolds.totalContacts();
         });
     }
+
+    @Test
+    void bakedWorldQueries() {
+        CollisionWorld world = new CollisionWorld();
+        world.addStatic(HeightfieldShapeTest.hills(32, 32), Transform.IDENTITY, true);
+        world.addStatic(TriangleMeshShapeTest.grid(16), Transform.ofTranslation(Vec3.of(70, 0, 0)), true);
+        for (int i = 0; i < 30; i++) {
+            world.addDynamic(new SphereShape(0.6), Transform.ofTranslation(Vec3.of(2.5 * i, 0.8, 3 + i % 5)));
+        }
+        world.update();
+        CollisionQuery query = world.newQuery();
+        PairBuffer pairs = new PairBuffer(256);
+        SphereShape probe = new SphereShape(1.2);
+        ColliderVisitor any = collider -> true;
+        double[] x = {0};
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 80 ? 0 : x[0] + 0.05;
+            world.update();
+            world.findPairs(pairs);
+            query.raycast(Vec3.of(x[0], 10, 4), Vec3.of(0.01, -1, 0), 100, -1, rayHit);
+            sink += pairs.size() + rayHit.distance();
+        });
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 80 ? 0 : x[0] + 0.05;
+            sink += query.overlap(probe, Transform.ofTranslation(Vec3.of(x[0], 0.5, 4)), -1, any);
+        });
+    }
 }
