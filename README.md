@@ -3,8 +3,8 @@
 Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
-Status: narrow phase between convex shapes, triangle meshes and heightfields. Planned next:
-raycasts, contacts with triangles (milestone 2), a collision world with broad phase (milestone 3),
+Status: narrow phase between convex shapes, triangle meshes, heightfields and raycasts. Planned
+next: contacts with triangles (milestone 2), a collision world with broad phase (milestone 3),
 then shape casts (milestone 4).
 
 ## Usage
@@ -29,6 +29,21 @@ if (distance < 0) {
 }
 boolean touching = narrow.overlaps(car, carPose, post, postPose); // cheaper yes/no
 ```
+
+## Raycasts
+
+```java
+RayCaster caster = new RayCaster(); // one per thread
+RaycastHit hit = new RaycastHit();
+if (caster.cast(track, trackPose, wheelCenter, Vec3.DOWN, suspensionLength, hit)) {
+    compress(hit.distance(), hit.normal(), hit.material()); // material of the triangle hit
+}
+```
+
+Works for every shape and any transform, including scale. Spheres, capsules and boxes are
+intersected exactly in local space, convex hulls by conservative advancement, meshes through their
+BVH and heightfields by walking the cells under the ray. A ray starting inside a convex shape hits
+at distance 0; triangles are hit from both sides, with the normal facing the ray.
 
 ## Shapes
 

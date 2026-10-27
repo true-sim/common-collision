@@ -25,17 +25,24 @@ final class Pose {
     private final double[] local = new double[3];
 
     void set(ConvexShape shape, Transform transform) {
+        set(shape, transform.translation().x(), transform.translation().y(), transform.translation().z(),
+            transform.rotation().x(), transform.rotation().y(), transform.rotation().z(), transform.rotation().w(),
+            transform.scale().x(), transform.scale().y(), transform.scale().z());
+    }
+
+    void set(ConvexShape shape, double tx, double ty, double tz, double qx, double qy, double qz, double qw,
+        double sx, double sy, double sz) {
         this.shape = shape;
-        tx = transform.translation().x();
-        ty = transform.translation().y();
-        tz = transform.translation().z();
-        qx = transform.rotation().x();
-        qy = transform.rotation().y();
-        qz = transform.rotation().z();
-        qw = transform.rotation().w();
-        sx = transform.scale().x();
-        sy = transform.scale().y();
-        sz = transform.scale().z();
+        this.tx = tx;
+        this.ty = ty;
+        this.tz = tz;
+        this.qx = qx;
+        this.qy = qy;
+        this.qz = qz;
+        this.qw = qw;
+        this.sx = sx;
+        this.sy = sy;
+        this.sz = sz;
         uniform = sx == sy && sy == sz;
         margin = uniform ? shape.margin() * Math.abs(sx) : 0;
         centerX = tx;

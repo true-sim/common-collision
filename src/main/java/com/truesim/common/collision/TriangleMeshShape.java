@@ -126,6 +126,11 @@ public final class TriangleMeshShape implements ConcaveShape {
         return bvh.bounds();
     }
 
+    boolean raycast(double ox, double oy, double oz, double dx, double dy, double dz, double max, Bvh.RayTest test,
+        com.truesim.common.math.spatial.RayHit hit) {
+        return bvh.raycast(ox, oy, oz, dx, dy, dz, max, test, hit);
+    }
+
     @Override
     public int queryAabb(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Bvh.Visitor visitor) {
         return bvh.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, visitor);
