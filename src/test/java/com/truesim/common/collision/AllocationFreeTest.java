@@ -85,4 +85,32 @@ class AllocationFreeTest {
             sink += field.queryAabb(x[0], -0.5, 30, x[0] + 3, 0.5, 33, visitor);
         });
     }
+
+    private final RayCaster caster = new RayCaster();
+    private final RaycastHit rayHit = new RaycastHit();
+
+    @Test
+    void raycasts() {
+        BoxShape box = new BoxShape(Vec3.of(1, 2, 3));
+        CapsuleShape capsule = new CapsuleShape(1, 0.5);
+        ConvexHullShape hull = ConvexHullShape.of(List.of(Vec3.of(-1, 0, 0), Vec3.of(1, 0, 0), Vec3.of(0, 1, 0), Vec3.of(0, 0, 1)));
+        TriangleMeshShape mesh = TriangleMeshShapeTest.grid(16);
+        HeightfieldShape field = HeightfieldShapeTest.hills(32, 32);
+        Quat rotation = Quat.fromYawPitchRoll(0.3, 0.2, 0.1);
+        double[] x = {0};
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 10 ? 0 : x[0] + 0.01;
+            Transform pose = Transform.of(Vec3.of(x[0], 0, 0), rotation);
+            caster.cast(box, pose, Vec3.of(x[0], 10, 0.1), Vec3.of(0.01, -1, 0), 100, rayHit);
+            sink += rayHit.distance();
+            caster.cast(capsule, pose, Vec3.of(x[0], 10, 0.1), Vec3.of(0.01, -1, 0), 100, rayHit);
+            sink += rayHit.normalY();
+            caster.cast(hull, pose, Vec3.of(x[0], 10, 0.1), Vec3.of(0.01, -1, 0), 100, rayHit);
+            sink += rayHit.distance();
+            caster.cast(mesh, pose, Vec3.of(x[0] + 3, 10, 4), Vec3.of(0.01, -1, 0.02), 100, rayHit);
+            sink += rayHit.material();
+            caster.cast(field, Transform.IDENTITY, Vec3.of(x[0] + 1, 10, 4), Vec3.of(1, -0.3, 0.5), 100, rayHit);
+            sink += rayHit.triangle();
+        });
+    }
 }

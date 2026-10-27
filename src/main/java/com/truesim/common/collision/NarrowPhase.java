@@ -2,6 +2,8 @@ package com.truesim.common.collision;
 
 import com.truesim.common.math.JitInlining;
 import com.truesim.common.math.Transform;
+import com.truesim.common.math.Vec3;
+import java.util.List;
 
 /**
  * Narrow-phase queries between two convex shapes: overlap, signed distance, closest points and penetration.
@@ -28,6 +30,8 @@ public final class NarrowPhase {
             "+com/truesim/common/collision/NarrowPhase.query", "+com/truesim/common/collision/NarrowPhase.overlaps",
             "+com/truesim/common/collision/Pose.set");
     }
+
+    private static final ConvexHullShape POINT = ConvexHullShape.of(List.of(Vec3.ZERO));
 
     private static final double OVERLAP_EPSILON_SQUARED = 1e-20;
     private static final double CORE_EPSILON = 1e-10;
@@ -125,6 +129,21 @@ public final class NarrowPhase {
             return contact.distance;
         }
         return penetration(contact);
+    }
+
+    /**
+     * Distance from point p to the core of {@code shape} placed at the origin, unrotated and unscaled, with the
+     * closest core point written to {@code out[0..2]} when the distance is positive. Used by raycasts.
+     */
+    double pointDistance(ConvexShape shape, double px, double py, double pz, double[] out) {
+        poseA.set(shape, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
+        poseB.set(POINT, px, py, pz, 0, 0, 0, 1, 1, 1, 1);
+        double distance = coreDistance();
+        closestPoints();
+        out[0] = pax;
+        out[1] = pay;
+        out[2] = paz;
+        return distance;
     }
 
     /** Fills the contact from core points (in the a/b scratch slots 0) and a core signed distance. */
