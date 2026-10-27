@@ -1,0 +1,449 @@
+package com.truesim.common.collision;
+
+import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.math.Quat;
+import com.truesim.common.math.Transform;
+import com.truesim.common.math.TransformArray;
+import com.truesim.common.math.Vec3;
+import com.truesim.common.math.geometry.Aabb;
+import com.truesim.common.math.geometry.AabbArray;
+import com.truesim.common.math.spatial.Bvh;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.Arrays;
+import java.util.Objects;
+
+/**
+ * A set of colliders, each a {@link Shape} placed by a pose, with two bounding volume hierarchies for fast queries: one
+ * over static colliders (rebuilt only when they change) and one over dynamic colliders (refit every
+ * {@link #update()}, rebuilt when it has degraded).
+ *
+ * <p>The world is separate from any scene: colliders are ints, and poses are either set directly or copied from a
+ * shared {@link TransformArray} in an explicit {@link #syncPoses} step. A typical step:
+ *
+ * <pre>{@code
+ * world.syncPoses(bodies);     // or setPose(...) per collider
+ * world.update();              // bounds and trees
+ * world.findPairs(pairs);      // broad phase: candidate pairs
+ * query.raycast(...);          // one CollisionQuery per thread
+ * }</pre>
+ *
+ * <p>Each collider has a material id and user data (free for the owner, e.g. a body index), and a collision filter:
+ * two colliders can collide when each one's group shares a bit with the other's mask. Ids of removed colliders are
+ * reused. Changing the world is not thread-safe; after {@link #update()}, any number of threads can query it through
+ * their own {@link CollisionQuery}.
+ */
+public final class CollisionWorld {
+
+    /** Doubles per pose: translation, rotation (x, y, z, w), scale. */
+    static final int POSE = 10;
+    private static final int USED = 1;
+    private static final int STATIC = 2;
+    private static final int CONCAVE = 4;
+
+    Shape[] shapes = new Shape[0];
+    double[] poses = new double[0];
+    int[] groups = new int[0];
+    private double[] localBounds = new double[0];
+    private int[] flags = new int[0];
+    private int[] masks = new int[0];
+    private int[] materials = new int[0];
+    private int[] userData = new int[0];
+    private int[] sources = new int[0];
+    private int[] free = new int[0];
+    private int freeCount;
+    private int highWater;
+    private int count;
+
+    // Broad phase.
+    AabbArray staticBounds = AabbArray.onHeap(0);
+    AabbArray dynamicBounds = AabbArray.onHeap(0);
+    Bvh staticTree = Bvh.build(staticBounds);
+    Bvh dynamicTree = Bvh.build(dynamicBounds);
+    int[] staticColliders = new int[0];
+    int[] dynamicColliders = new int[0];
+    private boolean structureChanged;
+    private boolean staticMoved;
+    private double rebuildThreshold = 1.5;
+
+    // Pair finding.
+    private final Bvh.Visitor dynamicPairs;
+    private final Bvh.Visitor staticPairs;
+    private PairBuffer pairTarget;
+    private int pairSlot;
+    private int pairCollider;
+
+    @AllowAllocation("one pair visitor each per world")
+    public CollisionWorld() {
+        dynamicPairs = this::dynamicPair;
+        staticPairs = this::staticPair;
+    }
+
+    // ---------------------------------------------------------------- colliders
+
+    /** Adds a collider that never moves (or rarely: moving it rebuilds the static tree). Returns its id. */
+    public int addStatic(Shape shape, Transform pose) {
+        return add(shape, pose, true);
+    }
+
+    /** Adds a collider that moves. Returns its id. */
+    public int addDynamic(Shape shape, Transform pose) {
+        return add(shape, pose, false);
+    }
+
+    @AllowAllocation("adding colliders")
+    private int add(Shape shape, Transform pose, boolean isStatic) {
+        int id;
+        if (freeCount > 0) {
+            id = free[--freeCount];
+        } else {
+            id = highWater++;
+            if (id == flags.length) {
+                grow(Math.max(16, 2 * id));
+            }
+        }
+        shapes[id] = shape;
+        flags[id] = USED | (isStatic ? STATIC : 0) | (shape instanceof ConcaveShape ? CONCAVE : 0);
+        Aabb bounds = shape.localBounds();
+        localBounds[6 * id] = bounds.min().x();
+        localBounds[6 * id + 1] = bounds.min().y();
+        localBounds[6 * id + 2] = bounds.min().z();
+        localBounds[6 * id + 3] = bounds.max().x();
+        localBounds[6 * id + 4] = bounds.max().y();
+        localBounds[6 * id + 5] = bounds.max().z();
+        groups[id] = 1;
+        masks[id] = -1;
+        materials[id] = 0;
+        userData[id] = 0;
+        sources[id] = -1;
+        count++;
+        structureChanged = true;
+        setPose(id, pose);
+        return id;
+    }
+
+    @AllowAllocation("adding colliders")
+    private void grow(int capacity) {
+        shapes = Arrays.copyOf(shapes, capacity);
+        poses = Arrays.copyOf(poses, POSE * capacity);
+        localBounds = Arrays.copyOf(localBounds, 6 * capacity);
+        flags = Arrays.copyOf(flags, capacity);
+        groups = Arrays.copyOf(groups, capacity);
+        masks = Arrays.copyOf(masks, capacity);
+        materials = Arrays.copyOf(materials, capacity);
+        userData = Arrays.copyOf(userData, capacity);
+        sources = Arrays.copyOf(sources, capacity);
+        free = Arrays.copyOf(free, capacity);
+    }
+
+    /** Removes the collider; its id may be reused by a later add. */
+    public void remove(int collider) {
+        check(collider);
+        flags[collider] = 0;
+        shapes[collider] = null;
+        free[freeCount++] = collider;
+        count--;
+        structureChanged = true;
+    }
+
+    public boolean contains(int collider) {
+        return collider >= 0 && collider < highWater && (flags[collider] & USED) != 0;
+    }
+
+    /** Number of colliders. */
+    public int size() {
+        return count;
+    }
+
+    public Shape shape(int collider) {
+        check(collider);
+        return shapes[collider];
+    }
+
+    public boolean isStatic(int collider) {
+        check(collider);
+        return (flags[collider] & STATIC) != 0;
+    }
+
+    public Transform pose(int collider) {
+        check(collider);
+        int p = POSE * collider;
+        return Transform.of(Vec3.of(poses[p], poses[p + 1], poses[p + 2]),
+            new Quat(poses[p + 3], poses[p + 4], poses[p + 5], poses[p + 6]),
+            Vec3.of(poses[p + 7], poses[p + 8], poses[p + 9]));
+    }
+
+    /** Moves the collider; takes effect for queries at the next {@link #update()}. */
+    public void setPose(int collider, Transform pose) {
+        check(collider);
+        int p = POSE * collider;
+        poses[p] = pose.translation().x();
+        poses[p + 1] = pose.translation().y();
+        poses[p + 2] = pose.translation().z();
+        poses[p + 3] = pose.rotation().x();
+        poses[p + 4] = pose.rotation().y();
+        poses[p + 5] = pose.rotation().z();
+        poses[p + 6] = pose.rotation().w();
+        poses[p + 7] = pose.scale().x();
+        poses[p + 8] = pose.scale().y();
+        poses[p + 9] = pose.scale().z();
+        if ((flags[collider] & STATIC) != 0) {
+            staticMoved = true;
+        }
+    }
+
+    /**
+     * Makes {@link #syncPoses} copy this collider's pose from index {@code index} of the source array; -1 stops it.
+     */
+    public void setPoseSource(int collider, int index) {
+        check(collider);
+        sources[collider] = Math.max(-1, index);
+    }
+
+    public int poseSource(int collider) {
+        check(collider);
+        return sources[collider];
+    }
+
+    /** Copies the pose of every collider with a pose source from {@code source}, e.g. the simulation's bodies. */
+    public void syncPoses(TransformArray source) {
+        for (int collider = 0; collider < highWater; collider++) {
+            if ((flags[collider] & USED) != 0 && sources[collider] >= 0) {
+                // A TransformArray stores the same ten doubles in the same order as the world's poses.
+                MemorySegment.copy(source.segment(), ValueLayout.JAVA_DOUBLE_UNALIGNED,
+                    Objects.checkIndex(sources[collider], source.size()) * source.stride(), poses, POSE * collider, POSE);
+                staticMoved |= (flags[collider] & STATIC) != 0;
+            }
+        }
+    }
+
+    public int material(int collider) {
+        check(collider);
+        return materials[collider];
+    }
+
+    public void setMaterial(int collider, int material) {
+        check(collider);
+        materials[collider] = material;
+    }
+
+    public int userData(int collider) {
+        check(collider);
+        return userData[collider];
+    }
+
+    public void setUserData(int collider, int data) {
+        check(collider);
+        userData[collider] = data;
+    }
+
+    public int group(int collider) {
+        check(collider);
+        return groups[collider];
+    }
+
+    public int mask(int collider) {
+        check(collider);
+        return masks[collider];
+    }
+
+    /**
+     * Sets the collision filter: two colliders can collide when {@code (groupA & maskB) != 0} and
+     * {@code (groupB & maskA) != 0}; queries find colliders whose group shares a bit with the query's mask. By default
+     * the group is 1 and the mask is all bits.
+     */
+    public void setFilter(int collider, int group, int mask) {
+        check(collider);
+        groups[collider] = group;
+        masks[collider] = mask;
+    }
+
+    private void check(int collider) {
+        if (!contains(collider)) {
+            throw new IllegalArgumentException("No collider " + collider);
+        }
+    }
+
+    boolean isLive(int collider) {
+        return (flags[collider] & USED) != 0;
+    }
+
+    boolean isConcave(int collider) {
+        return (flags[collider] & CONCAVE) != 0;
+    }
+
+    // ---------------------------------------------------------------- update
+
+    /** When the dynamic tree is this much slower than after a build ({@link Bvh#degradation()}), it is rebuilt. */
+    public double rebuildThreshold() {
+        return rebuildThreshold;
+    }
+
+    public void setRebuildThreshold(double threshold) {
+        rebuildThreshold = threshold;
+    }
+
+    /**
+     * Brings bounds and trees up to date with the colliders' poses: refits the dynamic tree (rebuilding it once it has
+     * degraded), rebuilds the static tree if a static collider moved, and rebuilds both after colliders were added or
+     * removed. Allocation-free unless colliders were added or removed.
+     */
+    public void update() {
+        if (structureChanged) {
+            rebuild();
+            return;
+        }
+        if (staticMoved) {
+            for (int slot = 0; slot < staticColliders.length; slot++) {
+                writeBounds(staticColliders[slot], staticBounds, slot);
+            }
+            staticTree.rebuild();
+            staticMoved = false;
+        }
+        for (int slot = 0; slot < dynamicColliders.length; slot++) {
+            writeBounds(dynamicColliders[slot], dynamicBounds, slot);
+        }
+        dynamicTree.refit();
+        if (dynamicTree.degradation() > rebuildThreshold) {
+            dynamicTree.rebuild();
+        }
+    }
+
+    @AllowAllocation("colliders were added or removed")
+    private void rebuild() {
+        int statics = 0;
+        for (int collider = 0; collider < highWater; collider++) {
+            statics += (flags[collider] & (USED | STATIC)) == (USED | STATIC) ? 1 : 0;
+        }
+        staticColliders = new int[statics];
+        dynamicColliders = new int[count - statics];
+        int s = 0;
+        int d = 0;
+        for (int collider = 0; collider < highWater; collider++) {
+            if ((flags[collider] & (USED | STATIC)) == (USED | STATIC)) {
+                staticColliders[s++] = collider;
+            } else if ((flags[collider] & USED) != 0) {
+                dynamicColliders[d++] = collider;
+            }
+        }
+        staticBounds = AabbArray.onHeap(staticColliders.length);
+        dynamicBounds = AabbArray.onHeap(dynamicColliders.length);
+        for (int slot = 0; slot < staticColliders.length; slot++) {
+            writeBounds(staticColliders[slot], staticBounds, slot);
+        }
+        for (int slot = 0; slot < dynamicColliders.length; slot++) {
+            writeBounds(dynamicColliders[slot], dynamicBounds, slot);
+        }
+        staticTree = Bvh.build(staticBounds);
+        dynamicTree = Bvh.build(dynamicBounds);
+        structureChanged = false;
+        staticMoved = false;
+    }
+
+    private void writeBounds(int collider, AabbArray target, int slot) {
+        double[] box = boundsScratch;
+        worldBounds(localBounds, 6 * collider, poses, POSE * collider, box);
+        target.set(slot, box[0], box[1], box[2], box[3], box[4], box[5]);
+    }
+
+    private final double[] boundsScratch = new double[6];
+
+    /** The collider's world bounds, computed from its current pose. */
+    public Aabb bounds(int collider) {
+        check(collider);
+        double[] box = new double[6];
+        worldBounds(localBounds, 6 * collider, poses, POSE * collider, box);
+        return new Aabb(Vec3.of(box[0], box[1], box[2]), Vec3.of(box[3], box[4], box[5]));
+    }
+
+    /**
+     * World bounds of the local box {@code local[li..li + 5]} (min, max) placed by the pose at {@code pose[pi]}: the box
+     * around the transformed box, exact for its corners. Written to {@code out[0..5]}.
+     */
+    static void worldBounds(double[] local, int li, double[] pose, int pi, double[] out) {
+        double cx = (local[li] + local[li + 3]) / 2;
+        double cy = (local[li + 1] + local[li + 4]) / 2;
+        double cz = (local[li + 2] + local[li + 5]) / 2;
+        double ex = (local[li + 3] - local[li]) / 2;
+        double ey = (local[li + 4] - local[li + 1]) / 2;
+        double ez = (local[li + 5] - local[li + 2]) / 2;
+        double qx = pose[pi + 3];
+        double qy = pose[pi + 4];
+        double qz = pose[pi + 5];
+        double qw = pose[pi + 6];
+        double sx = pose[pi + 7];
+        double sy = pose[pi + 8];
+        double sz = pose[pi + 9];
+        // Rotation times scale, column by column.
+        double m00 = (1 - 2 * (qy * qy + qz * qz)) * sx;
+        double m01 = 2 * (qx * qy - qz * qw) * sy;
+        double m02 = 2 * (qx * qz + qy * qw) * sz;
+        double m10 = 2 * (qx * qy + qz * qw) * sx;
+        double m11 = (1 - 2 * (qx * qx + qz * qz)) * sy;
+        double m12 = 2 * (qy * qz - qx * qw) * sz;
+        double m20 = 2 * (qx * qz - qy * qw) * sx;
+        double m21 = 2 * (qy * qz + qx * qw) * sy;
+        double m22 = (1 - 2 * (qx * qx + qy * qy)) * sz;
+        double wx = pose[pi] + m00 * cx + m01 * cy + m02 * cz;
+        double wy = pose[pi + 1] + m10 * cx + m11 * cy + m12 * cz;
+        double wz = pose[pi + 2] + m20 * cx + m21 * cy + m22 * cz;
+        double rx = Math.abs(m00) * ex + Math.abs(m01) * ey + Math.abs(m02) * ez;
+        double ry = Math.abs(m10) * ex + Math.abs(m11) * ey + Math.abs(m12) * ez;
+        double rz = Math.abs(m20) * ex + Math.abs(m21) * ey + Math.abs(m22) * ez;
+        out[0] = wx - rx;
+        out[1] = wy - ry;
+        out[2] = wz - rz;
+        out[3] = wx + rx;
+        out[4] = wy + ry;
+        out[5] = wz + rz;
+    }
+
+    // ---------------------------------------------------------------- queries
+
+    /** A query context for one thread. */
+    public CollisionQuery newQuery() {
+        return new CollisionQuery(this);
+    }
+
+    /**
+     * Broad phase: the pairs of colliders whose bounds overlap and whose filters let them collide, as of the last
+     * {@link #update()}. Each pair has at least one dynamic collider (the first); pairs of two meshes or heightfields
+     * are left out. The order is deterministic.
+     */
+    public void findPairs(PairBuffer out) {
+        out.clear();
+        pairTarget = out;
+        for (int slot = 0; slot < dynamicColliders.length; slot++) {
+            pairSlot = slot;
+            pairCollider = dynamicColliders[slot];
+            double minX = dynamicBounds.get(slot, 0);
+            double minY = dynamicBounds.get(slot, 1);
+            double minZ = dynamicBounds.get(slot, 2);
+            double maxX = dynamicBounds.get(slot, 3);
+            double maxY = dynamicBounds.get(slot, 4);
+            double maxZ = dynamicBounds.get(slot, 5);
+            dynamicTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, dynamicPairs);
+            staticTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, staticPairs);
+        }
+    }
+
+    private boolean dynamicPair(int slot) {
+        if (slot > pairSlot) {
+            pair(pairCollider, dynamicColliders[slot]);
+        }
+        return true;
+    }
+
+    private boolean staticPair(int slot) {
+        pair(pairCollider, staticColliders[slot]);
+        return true;
+    }
+
+    private void pair(int a, int b) {
+        // Colliders removed since the last update may still be in the trees.
+        if (isLive(a) && isLive(b) && (groups[a] & masks[b]) != 0 && (groups[b] & masks[a]) != 0
+            && !(isConcave(a) && isConcave(b))) {
+            pairTarget.add(a, b);
+        }
+    }
+}

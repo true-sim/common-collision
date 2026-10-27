@@ -287,6 +287,27 @@ public final class NarrowPhase {
         return out.size();
     }
 
+    /**
+     * Whether the shapes overlap, with poses as ten doubles each (translation, rotation, scale) starting at
+     * {@code a[ia]} and {@code b[ib]}: the layout a {@link CollisionWorld} stores.
+     */
+    boolean overlapsPlaced(ConvexShape shapeA, double[] a, int ia, ConvexShape shapeB, double[] b, int ib) {
+        poseA.set(shapeA, a[ia], a[ia + 1], a[ia + 2], a[ia + 3], a[ia + 4], a[ia + 5], a[ia + 6], a[ia + 7], a[ia + 8],
+            a[ia + 9]);
+        poseB.set(shapeB, b[ib], b[ib + 1], b[ib + 2], b[ib + 3], b[ib + 4], b[ib + 5], b[ib + 6], b[ib + 7], b[ib + 8],
+            b[ib + 9]);
+        return coreDistance() <= poseA.margin + poseB.margin;
+    }
+
+    /** {@link #contacts} with poses as ten doubles each, as in {@link #overlapsPlaced}. */
+    int contactsPlaced(ConvexShape convex, double[] a, int ia, ConcaveShape concave, double[] b, int ib,
+        double maxDistance, ContactBuffer out) {
+        poseA.set(convex, a[ia], a[ia + 1], a[ia + 2], a[ia + 3], a[ia + 4], a[ia + 5], a[ia + 6], a[ia + 7], a[ia + 8],
+            a[ia + 9]);
+        return contactsPlaced(concave, b[ib], b[ib + 1], b[ib + 2], b[ib + 3], b[ib + 4], b[ib + 5], b[ib + 6], b[ib + 7],
+            b[ib + 8], b[ib + 9], maxDistance, out);
+    }
+
     /** Grows the local bounds by world point p moved into the concave shape's local space. */
     private void includeLocal(double px, double py, double pz) {
         double vx = px - ctx;

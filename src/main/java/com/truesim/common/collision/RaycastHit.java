@@ -20,6 +20,7 @@ public final class RaycastHit {
     double normalZ;
     int triangle = NONE;
     int material = NONE;
+    int collider = NONE;
 
     /**
      * Ray parameter of the hit: the hit point is {@code origin + distance * direction}, so with a unit direction this
@@ -74,5 +75,23 @@ public final class RaycastHit {
     /** Material id of the triangle hit in a mesh or heightfield, or {@link #NONE}. */
     public int material() {
         return material;
+    }
+
+    /** The collider hit, for raycasts through a {@link CollisionWorld}; otherwise {@link #NONE}. */
+    public int collider() {
+        return collider;
+    }
+
+    void copyFrom(RaycastHit other) {
+        distance = other.distance;
+        pointX = other.pointX;
+        pointY = other.pointY;
+        pointZ = other.pointZ;
+        normalX = other.normalX;
+        normalY = other.normalY;
+        normalZ = other.normalZ;
+        triangle = other.triangle;
+        material = other.material;
+        collider = other.collider;
     }
 }

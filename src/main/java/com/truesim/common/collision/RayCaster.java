@@ -97,7 +97,7 @@ public final class RayCaster {
     }
 
     // Kept apart from the thin public methods so those inline into the caller and its transforms need no allocation.
-    private boolean castPlaced(Shape shape, double tx, double ty, double tz, double qx, double qy, double qz,
+    boolean castPlaced(Shape shape, double tx, double ty, double tz, double qx, double qy, double qz,
         double qw, double sx, double sy, double sz, double ox, double oy, double oz, double dx, double dy, double dz,
         double maxDistance, RaycastHit hit) {
         // Into local space: inverse rotation, then inverse scale. The ray parameter t stays the same.
@@ -116,6 +116,7 @@ public final class RayCaster {
         double ldx = (dx + qw * ux + (-qy * uz + qz * uy)) / sx;
         double ldy = (dy + qw * uy + (-qz * ux + qx * uz)) / sy;
         double ldz = (dz + qw * uz + (-qx * uy + qy * ux)) / sz;
+        hit.collider = RaycastHit.NONE;
         localTriangle = RaycastHit.NONE;
         if (!castLocal(shape, lox, loy, loz, ldx, ldy, ldz, maxDistance)) {
             hit.distance = MISS;

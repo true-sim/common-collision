@@ -132,4 +132,39 @@ class AllocationFreeTest {
                 Transform.ofTranslation(Vec3.of(0, 0.1, 0)), 0.05, buffer);
         });
     }
+
+    @Test
+    void worldSteps() {
+        CollisionWorld world = new CollisionWorld();
+        world.addStatic(HeightfieldShapeTest.hills(32, 32), Transform.IDENTITY);
+        com.truesim.common.math.TransformArray bodies = com.truesim.common.math.TransformArray.onHeap(40);
+        for (int i = 0; i < 40; i++) {
+            int id = world.addDynamic(i % 2 == 0 ? new SphereShape(0.5) : new BoxShape(Vec3.of(0.4, 0.3, 0.5)),
+                Transform.IDENTITY);
+            world.setPoseSource(id, i);
+            bodies.set(i, Transform.ofTranslation(Vec3.of(1.5 * i % 60, 1, 2 + i % 7)));
+        }
+        world.update();
+        CollisionQuery query = world.newQuery();
+        PairBuffer pairs = new PairBuffer(256);
+        SphereShape probe = new SphereShape(1.5);
+        int[] hits = {0};
+        ColliderVisitor counter = collider -> {
+            hits[0]++;
+            return true;
+        };
+        double[] x = {0};
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 30 ? 0 : x[0] + 0.01;
+            world.syncPoses(bodies);
+            world.update();
+            world.findPairs(pairs);
+            query.raycast(Vec3.of(x[0], 10, 4), Vec3.of(0, -1, 0.01), 100, -1, rayHit);
+            sink += pairs.size() + rayHit.distance();
+        });
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 30 ? 0 : x[0] + 0.01;
+            sink += query.overlap(probe, Transform.ofTranslation(Vec3.of(x[0], 1, 4)), -1, counter);
+        });
+    }
 }
