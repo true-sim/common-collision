@@ -3,9 +3,9 @@
 Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
-Status: milestone 1 (narrow phase between convex shapes) and triangle meshes. Planned next: triangle meshes and
-heightfields with per-triangle/per-cell material ids, raycasts, a collision world with broad phase,
-then shape casts.
+Status: narrow phase between convex shapes, and triangle meshes. Planned next: heightfields,
+raycasts, contacts with triangles (milestone 2), a collision world with broad phase (milestone 3),
+then shape casts (milestone 4).
 
 ## Usage
 
