@@ -6,7 +6,7 @@ plugins {
 description = "Collision detection for true-sim: shapes, GJK/EPA, raycasts, contacts and a broad-phase collision world."
 
 dependencies {
-    api("com.truesim.common:common-math:0.2.0")
+    api("com.truesim.common:common-math:0.3.0")
 }
 
 coverage {

@@ -3,9 +3,9 @@
 Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
-Status: milestone 2 done: narrow phase between convex shapes, triangle meshes and heightfields
-with contacts, and raycasts. Planned next: a collision world with broad phase (milestone 3), then
-shape casts (milestone 4).
+Status: narrow phase between convex shapes, triangle meshes and heightfields with contacts,
+raycasts, and a collision world with broad phase. Planned next: batch narrow phase in ranges for
+parallel jobs and static mesh baking (milestone 3), then shape casts (milestone 4).
 
 ## Usage
 
@@ -60,6 +60,32 @@ Works for every shape and any transform, including scale. Spheres, capsules and 
 intersected exactly in local space, convex hulls by conservative advancement, meshes through their
 BVH and heightfields by walking the cells under the ray. A ray starting inside a convex shape hits
 at distance 0; triangles are hit from both sides, with the normal facing the ray.
+
+## Collision world
+
+```java
+CollisionWorld world = new CollisionWorld();
+int track = world.addStatic(trackMesh, Transform.IDENTITY);
+int car = world.addDynamic(carHull, carPose);
+world.setPoseSource(car, carBodyIndex); // poses come from the simulation's TransformArray
+world.setMaterial(track, ASPHALT);
+
+// Every step:
+world.syncPoses(bodies);    // or world.setPose(id, pose)
+world.update();             // refit (and when needed rebuild) the trees
+world.findPairs(pairs);     // broad phase: candidate pairs, deterministic order
+
+CollisionQuery query = world.newQuery(); // one per thread, reused
+query.raycast(origin, direction, 100, mask, hit); // hit.collider()
+query.overlap(shape, pose, mask, collider -> { ...; return true; });
+```
+
+Colliders are ints with a shape, pose, static or dynamic flag, material id, user data and a
+collision filter (group and mask bits). Static colliders live in one BVH, rebuilt only when one
+moves; dynamic colliders in another, refit every update and rebuilt when it has degraded. The world
+is separate from any scene: poses are set directly or copied from a shared `TransformArray`. After
+`update()`, any number of threads can query concurrently, each with its own `CollisionQuery`.
+Pairs of two meshes or heightfields are left out.
 
 ## Shapes
 
