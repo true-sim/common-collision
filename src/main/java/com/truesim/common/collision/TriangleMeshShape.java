@@ -1,12 +1,15 @@
 package com.truesim.common.collision;
 
+import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.Vec3;
 import com.truesim.common.math.geometry.Aabb;
 import com.truesim.common.math.geometry.AabbArray;
 import com.truesim.common.math.geometry.Triangle;
 import com.truesim.common.math.spatial.Bvh;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Triangle mesh for static or kinematic geometry such as a track, with a material id per triangle.
@@ -25,6 +28,7 @@ public final class TriangleMeshShape implements ConcaveShape {
     private final double[] vertices;
     private final int[] indices;
     private final int[] materials;
+    private final byte[] activeEdges;
     private final Bvh bvh;
 
     private TriangleMeshShape(double[] vertices, int[] indices, int[] materials) {
@@ -46,6 +50,57 @@ public final class TriangleMeshShape implements ConcaveShape {
                 Math.max(vertices[a + 2], Math.max(vertices[b + 2], vertices[c + 2])));
         }
         this.bvh = Bvh.build(bounds);
+        this.activeEdges = activeEdges(vertices, indices);
+    }
+
+    /** Finds each edge's neighbor across it and classifies the edge; unshared, non-manifold or inconsistently wound edges stay active. */
+    @AllowAllocation("one-time setup")
+    private static byte[] activeEdges(double[] vertices, int[] indices) {
+        int edges = indices.length;
+        int[] partner = new int[edges];
+        Arrays.fill(partner, -1);
+        Map<Long, Integer> first = new HashMap<>();
+        for (int edge = 0; edge < edges; edge++) {
+            int a = indices[edge];
+            int b = indices[next(edge)];
+            Integer other = first.putIfAbsent(((long) Math.min(a, b) << 32) | Math.max(a, b), edge);
+            if (other != null) {
+                if (partner[other] == -1) {
+                    partner[other] = edge;
+                    partner[edge] = other;
+                } else {
+                    // Three or more triangles share the edge: non-manifold, keep it sharp.
+                    if (partner[other] >= 0) {
+                        partner[partner[other]] = -2;
+                    }
+                    partner[other] = -2;
+                    partner[edge] = -2;
+                }
+            }
+        }
+        byte[] active = new byte[edges / 3];
+        for (int edge = 0; edge < edges; edge++) {
+            int other = partner[edge];
+            int a = 3 * indices[edge];
+            int b = 3 * indices[next(edge)];
+            boolean sharp = other < 0 || indices[other] != indices[next(edge)];
+            if (!sharp) {
+                int c = 3 * indices[next(next(edge))];
+                int d = 3 * indices[next(next(other))];
+                sharp = Edges.active(vertices[a], vertices[a + 1], vertices[a + 2], vertices[b], vertices[b + 1],
+                    vertices[b + 2], vertices[c], vertices[c + 1], vertices[c + 2], vertices[d], vertices[d + 1],
+                    vertices[d + 2]);
+            }
+            if (sharp) {
+                active[edge / 3] |= (byte) (1 << (edge % 3));
+            }
+        }
+        return active;
+    }
+
+    /** The next edge (and corner) of the same triangle. */
+    private static int next(int edge) {
+        return edge % 3 == 2 ? edge - 2 : edge + 1;
     }
 
     /** A mesh with material id 0 on every triangle. */
@@ -119,6 +174,11 @@ public final class TriangleMeshShape implements ConcaveShape {
     @Override
     public int material(int triangle) {
         return materials[triangle];
+    }
+
+    @Override
+    public int activeEdges(int triangle) {
+        return activeEdges[triangle];
     }
 
     @Override

@@ -143,6 +143,34 @@ public final class HeightfieldShape implements ConcaveShape {
         return new Triangle(Vec3.of(p[0], p[1], p[2]), Vec3.of(p[3], p[4], p[5]), Vec3.of(p[6], p[7], p[8]));
     }
 
+    @Override
+    public int activeEdges(int triangle) {
+        int cell = triangle >> 1;
+        int x = cell % (samplesX - 1);
+        int z = cell / (samplesX - 1);
+        if ((triangle & 1) == 0) {
+            // a = (x, z), b = (x, z + 1), c = (x + 1, z); neighbors across a-b, b-c (the diagonal) and c-a.
+            return edge(x, z, x, z + 1, x + 1, z, x - 1, z + 1, 0)
+                | edge(x, z + 1, x + 1, z, x, z, x + 1, z + 1, 1)
+                | edge(x + 1, z, x, z, x, z + 1, x + 1, z - 1, 2);
+        }
+        // a = (x + 1, z), b = (x, z + 1), c = (x + 1, z + 1); neighbors across a-b (the diagonal), b-c and c-a.
+        return edge(x + 1, z, x, z + 1, x + 1, z + 1, x, z, 0)
+            | edge(x, z + 1, x + 1, z + 1, x + 1, z, x, z + 2, 1)
+            | edge(x + 1, z + 1, x + 1, z, x, z + 1, x + 2, z, 2);
+    }
+
+    /** Bit {@code bit} if edge (a, b) of triangle (a, b, c) is active given the neighbor's far sample d, which may lie outside the grid. */
+    private int edge(int ax, int az, int bx, int bz, int cx, int cz, int dx, int dz, int bit) {
+        if (dx < 0 || dx >= samplesX || dz < 0 || dz >= samplesZ) {
+            return 1 << bit; // boundary
+        }
+        boolean active = Edges.active(ax * cellSizeX, height(ax, az), az * cellSizeZ, bx * cellSizeX, height(bx, bz),
+            bz * cellSizeZ, cx * cellSizeX, height(cx, cz), cz * cellSizeZ, dx * cellSizeX, height(dx, dz),
+            dz * cellSizeZ);
+        return active ? 1 << bit : 0;
+    }
+
     private void sample(int x, int z, double[] out, int at) {
         out[at] = x * cellSizeX;
         out[at + 1] = heights[z * samplesX + x];
