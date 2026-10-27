@@ -9,6 +9,9 @@ import com.truesim.common.math.Vec3;
  */
 public final class Contact {
 
+    /** {@link #featureA()} and friends for a convex shape, which has no triangles. */
+    public static final int NONE = -1;
+
     double distance;
     double normalX;
     double normalY;
@@ -19,6 +22,10 @@ public final class Contact {
     double bx;
     double by;
     double bz;
+    int featureA = NONE;
+    int featureB = NONE;
+    int materialA = NONE;
+    int materialB = NONE;
 
     /** Distance between the surfaces: positive when apart, negative when penetrating (minus the depth). */
     public double distance() {
@@ -59,5 +66,42 @@ public final class Contact {
 
     public double normalZ() {
         return normalZ;
+    }
+
+    /** Triangle of shape A in contact (for a mesh or heightfield), or {@link #NONE}. */
+    public int featureA() {
+        return featureA;
+    }
+
+    /** Triangle of shape B in contact (for a mesh or heightfield), or {@link #NONE}. */
+    public int featureB() {
+        return featureB;
+    }
+
+    /** Material id of A's triangle in contact, or {@link #NONE}. */
+    public int materialA() {
+        return materialA;
+    }
+
+    /** Material id of B's triangle in contact, or {@link #NONE}. */
+    public int materialB() {
+        return materialB;
+    }
+
+    void copyFrom(Contact other) {
+        distance = other.distance;
+        normalX = other.normalX;
+        normalY = other.normalY;
+        normalZ = other.normalZ;
+        ax = other.ax;
+        ay = other.ay;
+        az = other.az;
+        bx = other.bx;
+        by = other.by;
+        bz = other.bz;
+        featureA = other.featureA;
+        featureB = other.featureB;
+        materialA = other.materialA;
+        materialB = other.materialB;
     }
 }

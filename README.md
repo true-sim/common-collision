@@ -3,9 +3,9 @@
 Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
-Status: narrow phase between convex shapes, triangle meshes, heightfields and raycasts. Planned
-next: contacts with triangles (milestone 2), a collision world with broad phase (milestone 3),
-then shape casts (milestone 4).
+Status: milestone 2 done: narrow phase between convex shapes, triangle meshes and heightfields
+with contacts, and raycasts. Planned next: a collision world with broad phase (milestone 3), then
+shape casts (milestone 4).
 
 ## Usage
 
@@ -29,6 +29,22 @@ if (distance < 0) {
 }
 boolean touching = narrow.overlaps(car, carPose, post, postPose); // cheaper yes/no
 ```
+
+## Contacts with meshes and heightfields
+
+```java
+ContactBuffer contacts = new ContactBuffer(16); // keeps the deepest contacts when full
+int count = narrow.contacts(wheel, wheelPose, track, trackPose, 0.02, contacts);
+for (int i = 0; i < count; i++) {
+    Contact c = contacts.get(i);
+    resolve(c.normal(), c.depth(), c.materialB()); // material of the triangle touched
+}
+```
+
+One contact per triangle within the contact distance, each with its triangle index and material.
+Edges between triangles are classified once: real creases (convex, bent more than 5 degrees, or on
+the boundary) are *active*; flat and concave seams are not. A contact on an inactive edge gets the
+face normal, so objects slide across seams without catching on them.
 
 ## Raycasts
 

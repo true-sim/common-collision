@@ -113,4 +113,23 @@ class AllocationFreeTest {
             sink += rayHit.triangle();
         });
     }
+
+    private final ContactBuffer buffer = new ContactBuffer(32);
+
+    @Test
+    void triangleContacts() {
+        BoxShape box = new BoxShape(Vec3.of(0.5, 0.4, 0.8));
+        SphereShape ball = new SphereShape(0.6);
+        TriangleMeshShape mesh = TriangleMeshShapeTest.grid(16);
+        HeightfieldShape field = HeightfieldShapeTest.hills(32, 32);
+        Quat rotation = Quat.fromYawPitchRoll(0.3, 0.2, 0.1);
+        double[] x = {0};
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 10 ? 0 : x[0] + 0.01;
+            Transform pose = Transform.of(Vec3.of(3 + x[0], 0.2, 4), rotation);
+            sink += narrow.contacts(box, pose, mesh, Transform.IDENTITY, 0.05, buffer);
+            sink += narrow.contacts(ball, Transform.of(Vec3.of(5 + x[0], 0.5, 9), rotation), field,
+                Transform.ofTranslation(Vec3.of(0, 0.1, 0)), 0.05, buffer);
+        });
+    }
 }

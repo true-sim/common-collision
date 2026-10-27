@@ -1,8 +1,10 @@
 package com.truesim.common.collision;
 
+import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.JitInlining;
 import com.truesim.common.math.Transform;
 import com.truesim.common.math.Vec3;
+import com.truesim.common.math.spatial.Bvh;
 import java.util.List;
 
 /**
@@ -28,7 +30,7 @@ public final class NarrowPhase {
         // transforms callers create for a query need no allocation.
         JitInlining.include(
             "+com/truesim/common/collision/NarrowPhase.query", "+com/truesim/common/collision/NarrowPhase.overlaps",
-            "+com/truesim/common/collision/Pose.set");
+            "+com/truesim/common/collision/NarrowPhase.contacts", "+com/truesim/common/collision/Pose.set");
     }
 
     private static final ConvexHullShape POINT = ConvexHullShape.of(List.of(Vec3.ZERO));
@@ -85,6 +87,7 @@ public final class NarrowPhase {
     }
 
     /** With explicit safety limits, e.g. to test what happens when they are reached. */
+    @AllowAllocation("one triangle visitor per narrow phase")
     NarrowPhase(int maxIterations, int maxVertices, int maxFaces) {
         this.maxIterations = maxIterations;
         this.maxVertices = maxVertices;
@@ -97,6 +100,7 @@ public final class NarrowPhase {
         faceDistances = new double[maxFaces];
         faceAlive = new boolean[maxFaces];
         edges = new int[2 * 3 * maxFaces];
+        triangleVisitor = this::collideTriangle;
     }
 
     // ---------------------------------------------------------------- queries
@@ -160,6 +164,10 @@ public final class NarrowPhase {
         contact.bx = pbx - nx * mb;
         contact.by = pby - ny * mb;
         contact.bz = pbz - nz * mb;
+        contact.featureA = Contact.NONE;
+        contact.featureB = Contact.NONE;
+        contact.materialA = Contact.NONE;
+        contact.materialB = Contact.NONE;
     }
 
     private double pax;
@@ -186,6 +194,188 @@ public final class NarrowPhase {
             pby += l * b[3 * i + 1];
             pbz += l * b[3 * i + 2];
         }
+    }
+
+    // ---------------------------------------------------------------- convex against concave
+
+    private static final double FACE_COS = 1 - 1e-9;
+    private static final double EDGE_WEIGHT = 1e-9;
+
+    private final TriangleCore core = new TriangleCore();
+    private final Contact scratch = new Contact();
+    private final double[] support = new double[3];
+    private final double[] localCorners = new double[9];
+    private final Bvh.Visitor triangleVisitor;
+    private ConcaveShape concave;
+    private ContactBuffer target;
+    private double maxDistance;
+    private double ctx;
+    private double cty;
+    private double ctz;
+    private double cqx;
+    private double cqy;
+    private double cqz;
+    private double cqw;
+    private double csx;
+    private double csy;
+    private double csz;
+    private double localMinX;
+    private double localMinY;
+    private double localMinZ;
+    private double localMaxX;
+    private double localMaxY;
+    private double localMaxZ;
+
+    /**
+     * Contacts between a convex shape (A) and the triangles of a mesh or heightfield (B): one contact per triangle
+     * within {@code maxDistance}, written to {@code out} (cleared first; when it fills up, the deepest contacts are
+     * kept). Each contact names its triangle ({@link Contact#featureB()}) and material ({@link Contact#materialB()}).
+     * Contacts on seams between triangles that form a smooth or concave surface get the face normal, so objects slide
+     * over seams without catching on them. Returns the number of contacts.
+     */
+    public int contacts(ConvexShape convex, Transform convexTransform, ConcaveShape concave, Transform concaveTransform,
+        double maxDistance, ContactBuffer out) {
+        poseA.set(convex, convexTransform);
+        return contactsPlaced(concave,
+            concaveTransform.translation().x(), concaveTransform.translation().y(), concaveTransform.translation().z(),
+            concaveTransform.rotation().x(), concaveTransform.rotation().y(), concaveTransform.rotation().z(),
+            concaveTransform.rotation().w(),
+            concaveTransform.scale().x(), concaveTransform.scale().y(), concaveTransform.scale().z(), maxDistance, out);
+    }
+
+    private int contactsPlaced(ConcaveShape shape, double tx, double ty, double tz, double qx, double qy, double qz,
+        double qw, double sx, double sy, double sz, double distance, ContactBuffer out) {
+        concave = shape;
+        target = out;
+        maxDistance = distance;
+        ctx = tx;
+        cty = ty;
+        ctz = tz;
+        cqx = qx;
+        cqy = qy;
+        cqz = qz;
+        cqw = qw;
+        csx = sx;
+        csy = sy;
+        csz = sz;
+        out.clear();
+        // World bounds of the convex shape from its support points, grown by the contact distance.
+        double grow = poseA.margin + Math.max(0, distance);
+        poseA.coreSupport(1, 0, 0, support, 0);
+        double maxX = support[0] + grow;
+        poseA.coreSupport(0, 1, 0, support, 0);
+        double maxY = support[1] + grow;
+        poseA.coreSupport(0, 0, 1, support, 0);
+        double maxZ = support[2] + grow;
+        poseA.coreSupport(-1, 0, 0, support, 0);
+        double minX = support[0] - grow;
+        poseA.coreSupport(0, -1, 0, support, 0);
+        double minY = support[1] - grow;
+        poseA.coreSupport(0, 0, -1, support, 0);
+        double minZ = support[2] - grow;
+        // Into the concave shape's local space: the bounds of the box's eight corners.
+        localMinX = Double.POSITIVE_INFINITY;
+        localMinY = Double.POSITIVE_INFINITY;
+        localMinZ = Double.POSITIVE_INFINITY;
+        localMaxX = Double.NEGATIVE_INFINITY;
+        localMaxY = Double.NEGATIVE_INFINITY;
+        localMaxZ = Double.NEGATIVE_INFINITY;
+        for (int corner = 0; corner < 8; corner++) {
+            includeLocal((corner & 1) == 0 ? minX : maxX, (corner & 2) == 0 ? minY : maxY, (corner & 4) == 0 ? minZ : maxZ);
+        }
+        shape.queryAabb(localMinX, localMinY, localMinZ, localMaxX, localMaxY, localMaxZ, triangleVisitor);
+        return out.size();
+    }
+
+    /** Grows the local bounds by world point p moved into the concave shape's local space. */
+    private void includeLocal(double px, double py, double pz) {
+        double vx = px - ctx;
+        double vy = py - cty;
+        double vz = pz - ctz;
+        double ux = 2 * (-cqy * vz + cqz * vy);
+        double uy = 2 * (-cqz * vx + cqx * vz);
+        double uz = 2 * (-cqx * vy + cqy * vx);
+        double lx = (vx + cqw * ux + (-cqy * uz + cqz * uy)) / csx;
+        double ly = (vy + cqw * uy + (-cqz * ux + cqx * uz)) / csy;
+        double lz = (vz + cqw * uz + (-cqx * uy + cqy * ux)) / csz;
+        localMinX = Math.min(localMinX, lx);
+        localMinY = Math.min(localMinY, ly);
+        localMinZ = Math.min(localMinZ, lz);
+        localMaxX = Math.max(localMaxX, lx);
+        localMaxY = Math.max(localMaxY, ly);
+        localMaxZ = Math.max(localMaxZ, lz);
+    }
+
+    private boolean collideTriangle(int triangle) {
+        concave.triangle(triangle, localCorners, 0);
+        double[] world = core.corners;
+        for (int i = 0; i < 9; i += 3) {
+            double px = localCorners[i] * csx;
+            double py = localCorners[i + 1] * csy;
+            double pz = localCorners[i + 2] * csz;
+            double wx = 2 * (cqy * pz - cqz * py);
+            double wy = 2 * (cqz * px - cqx * pz);
+            double wz = 2 * (cqx * py - cqy * px);
+            world[i] = ctx + px + cqw * wx + (cqy * wz - cqz * wy);
+            world[i + 1] = cty + py + cqw * wy + (cqz * wx - cqx * wz);
+            world[i + 2] = ctz + pz + cqw * wz + (cqx * wy - cqy * wx);
+        }
+        poseB.set(core, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
+        solve(scratch);
+        smoothInactiveEdge(concave.activeEdges(triangle));
+        if (scratch.distance <= maxDistance) {
+            scratch.featureB = triangle;
+            scratch.materialB = concave.material(triangle);
+            target.add(scratch);
+        }
+        return true;
+    }
+
+    /**
+     * If the scratch contact touches the triangle (B) only on inactive edges or at a vertex between them, replaces its
+     * normal with the face normal, so the seam pushes like the surface around it.
+     */
+    private void smoothInactiveEdge(int activeEdges) {
+        double[] c = core.corners;
+        double e1x = c[3] - c[0];
+        double e1y = c[4] - c[1];
+        double e1z = c[5] - c[2];
+        double e2x = c[6] - c[0];
+        double e2y = c[7] - c[1];
+        double e2z = c[8] - c[2];
+        double fx = e1y * e2z - e1z * e2y;
+        double fy = e1z * e2x - e1x * e2z;
+        double fz = e1x * e2y - e1y * e2x;
+        double length = Math.sqrt(fx * fx + fy * fy + fz * fz);
+        // The contact normal points from A to B; the face normal must point from B to A.
+        double facing = -(scratch.normalX * fx + scratch.normalY * fy + scratch.normalZ * fz) / length;
+        // Degenerate triangles have only active edges, so length is positive past the first check.
+        if (activeEdges == 7 || Math.abs(facing) >= FACE_COS) {
+            return; // all edges sharp, or already a face contact
+        }
+        // Barycentric weights of B's contact point tell which edges it lies on.
+        double px = scratch.bx - c[0];
+        double py = scratch.by - c[1];
+        double pz = scratch.bz - c[2];
+        double d00 = e1x * e1x + e1y * e1y + e1z * e1z;
+        double d01 = e1x * e2x + e1y * e2y + e1z * e2z;
+        double d11 = e2x * e2x + e2y * e2y + e2z * e2z;
+        double d20 = px * e1x + py * e1y + pz * e1z;
+        double d21 = px * e2x + py * e2y + pz * e2z;
+        double denominator = d00 * d11 - d01 * d01;
+        double wb = (d11 * d20 - d01 * d21) / denominator;
+        double wc = (d00 * d21 - d01 * d20) / denominator;
+        double wa = 1 - wb - wc;
+        int touched = (wc <= EDGE_WEIGHT ? 1 : 0) | (wa <= EDGE_WEIGHT ? 2 : 0) | (wb <= EDGE_WEIGHT ? 4 : 0);
+        if ((touched & activeEdges) != 0) {
+            return; // on a real crease; inside the face (only by rounding) the face normal is right anyway
+        }
+        // Face normal on the side of A's center; the distance and points stay as measured (as in Jolt's active edges).
+        double side = fx * (poseA.centerX - c[0]) + fy * (poseA.centerY - c[1]) + fz * (poseA.centerZ - c[2]);
+        double scale = side >= 0 ? -1 / length : 1 / length;
+        scratch.normalX = fx * scale;
+        scratch.normalY = fy * scale;
+        scratch.normalZ = fz * scale;
     }
 
     // ---------------------------------------------------------------- GJK
