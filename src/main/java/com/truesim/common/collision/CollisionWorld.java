@@ -40,6 +40,7 @@ public final class CollisionWorld {
     private static final int USED = 1;
     private static final int STATIC = 2;
     private static final int CONCAVE = 4;
+    private static final int BAKED = 8;
 
     Shape[] shapes = new Shape[0];
     double[] poses = new double[0];
@@ -61,10 +62,13 @@ public final class CollisionWorld {
     Bvh staticTree = Bvh.build(staticBounds);
     Bvh dynamicTree = Bvh.build(dynamicBounds);
     int[] staticColliders = new int[0];
+    /** For each static tree entry, the triangle of a baked collider, or -1 for a whole collider. */
+    int[] staticTriangles = new int[0];
     int[] dynamicColliders = new int[0];
     private boolean structureChanged;
     private boolean staticMoved;
     private double rebuildThreshold = 1.5;
+    private double boundsMargin;
 
     // Pair finding.
     private final Bvh.Visitor dynamicPairs;
@@ -72,6 +76,9 @@ public final class CollisionWorld {
     private PairBuffer pairTarget;
     private int pairSlot;
     private int pairCollider;
+    // Baked colliders appear once per triangle in the static tree: report each pair once.
+    private long[] pairSeen = new long[0];
+    private long pairStamp;
 
     @AllowAllocation("one pair visitor each per world")
     public CollisionWorld() {
@@ -83,16 +90,30 @@ public final class CollisionWorld {
 
     /** Adds a collider that never moves (or rarely: moving it rebuilds the static tree). Returns its id. */
     public int addStatic(Shape shape, Transform pose) {
-        return add(shape, pose, true);
+        return add(shape, pose, true, false);
+    }
+
+    /**
+     * Adds a static collider; with {@code bake}, a mesh or heightfield goes into the static tree triangle by triangle,
+     * in world space, instead of as one entry with its own tree. Raycasts and overlap queries then descend one tree
+     * instead of two, which pays off for large static geometry such as a track; the cost is a static tree rebuild
+     * whenever baked geometry is added, removed or moved, and a copy of its triangles' bounds per collider. Results
+     * are the same either way.
+     */
+    public int addStatic(Shape shape, Transform pose, boolean bake) {
+        if (bake && !(shape instanceof ConcaveShape)) {
+            throw new IllegalArgumentException("Only meshes and heightfields can be baked: " + shape);
+        }
+        return add(shape, pose, true, bake);
     }
 
     /** Adds a collider that moves. Returns its id. */
     public int addDynamic(Shape shape, Transform pose) {
-        return add(shape, pose, false);
+        return add(shape, pose, false, false);
     }
 
     @AllowAllocation("adding colliders")
-    private int add(Shape shape, Transform pose, boolean isStatic) {
+    private int add(Shape shape, Transform pose, boolean isStatic, boolean bake) {
         int id;
         if (freeCount > 0) {
             id = free[--freeCount];
@@ -103,7 +124,7 @@ public final class CollisionWorld {
             }
         }
         shapes[id] = shape;
-        flags[id] = USED | (isStatic ? STATIC : 0) | (shape instanceof ConcaveShape ? CONCAVE : 0);
+        flags[id] = USED | (isStatic ? STATIC : 0) | (shape instanceof ConcaveShape ? CONCAVE : 0) | (bake ? BAKED : 0);
         Aabb bounds = shape.localBounds();
         localBounds[6 * id] = bounds.min().x();
         localBounds[6 * id + 1] = bounds.min().y();
@@ -134,6 +155,12 @@ public final class CollisionWorld {
         userData = Arrays.copyOf(userData, capacity);
         sources = Arrays.copyOf(sources, capacity);
         free = Arrays.copyOf(free, capacity);
+        pairSeen = Arrays.copyOf(pairSeen, capacity);
+    }
+
+    /** Number of collider ids in use or freed so far: every id is below it. */
+    int capacity() {
+        return highWater;
     }
 
     /** Removes the collider; its id may be reused by a later add. */
@@ -158,6 +185,11 @@ public final class CollisionWorld {
     public Shape shape(int collider) {
         check(collider);
         return shapes[collider];
+    }
+
+    /** Whether the collider was added baked: its triangles are entries of the static tree. */
+    public boolean isBaked(int collider) {
+        return (flags[collider] & BAKED) != 0;
     }
 
     public boolean isStatic(int collider) {
@@ -283,10 +315,28 @@ public final class CollisionWorld {
         rebuildThreshold = threshold;
     }
 
+    public double boundsMargin() {
+        return boundsMargin;
+    }
+
+    /**
+     * Grows every collider's bounds by {@code margin}, from the next {@link #update()}. Set it to at least the contact
+     * distance passed to {@link CollisionQuery#collide}, so pairs closer than that are found even when their exact
+     * bounds do not overlap yet. Default 0.
+     */
+    public void setBoundsMargin(double margin) {
+        if (!(margin >= 0)) {
+            throw new IllegalArgumentException("Margin must not be negative: " + margin);
+        }
+        boundsMargin = margin;
+        structureChanged = true;
+    }
+
     /**
      * Brings bounds and trees up to date with the colliders' poses: refits the dynamic tree (rebuilding it once it has
      * degraded), rebuilds the static tree if a static collider moved, and rebuilds both after colliders were added or
-     * removed. Allocation-free unless colliders were added or removed.
+     * removed. Allocation-free unless a tree is rebuilt: after colliders were added or removed, a static one moved, or
+     * the dynamic tree degraded past the threshold.
      */
     public void update() {
         if (structureChanged) {
@@ -295,7 +345,7 @@ public final class CollisionWorld {
         }
         if (staticMoved) {
             for (int slot = 0; slot < staticColliders.length; slot++) {
-                writeBounds(staticColliders[slot], staticBounds, slot);
+                writeStaticBounds(slot);
             }
             staticTree.rebuild();
             staticMoved = false;
@@ -311,17 +361,27 @@ public final class CollisionWorld {
 
     @AllowAllocation("colliders were added or removed")
     private void rebuild() {
+        // Static tree entries: one per static collider, or one per triangle of a baked one.
         int statics = 0;
+        int staticEntries = 0;
         for (int collider = 0; collider < highWater; collider++) {
-            statics += (flags[collider] & (USED | STATIC)) == (USED | STATIC) ? 1 : 0;
+            if ((flags[collider] & (USED | STATIC)) == (USED | STATIC)) {
+                statics++;
+                staticEntries += isBaked(collider) ? ((ConcaveShape) shapes[collider]).triangleCount() : 1;
+            }
         }
-        staticColliders = new int[statics];
+        staticColliders = new int[staticEntries];
+        staticTriangles = new int[staticEntries];
         dynamicColliders = new int[count - statics];
         int s = 0;
         int d = 0;
         for (int collider = 0; collider < highWater; collider++) {
             if ((flags[collider] & (USED | STATIC)) == (USED | STATIC)) {
-                staticColliders[s++] = collider;
+                int triangles = isBaked(collider) ? ((ConcaveShape) shapes[collider]).triangleCount() : 0;
+                for (int t = 0; t < Math.max(1, triangles); t++) {
+                    staticColliders[s] = collider;
+                    staticTriangles[s++] = triangles == 0 ? -1 : t;
+                }
             } else if ((flags[collider] & USED) != 0) {
                 dynamicColliders[d++] = collider;
             }
@@ -329,7 +389,7 @@ public final class CollisionWorld {
         staticBounds = AabbArray.onHeap(staticColliders.length);
         dynamicBounds = AabbArray.onHeap(dynamicColliders.length);
         for (int slot = 0; slot < staticColliders.length; slot++) {
-            writeBounds(staticColliders[slot], staticBounds, slot);
+            writeStaticBounds(slot);
         }
         for (int slot = 0; slot < dynamicColliders.length; slot++) {
             writeBounds(dynamicColliders[slot], dynamicBounds, slot);
@@ -340,10 +400,54 @@ public final class CollisionWorld {
         staticMoved = false;
     }
 
+    /** Bounds of a static tree entry: the whole collider, or one triangle of a baked one. */
+    private void writeStaticBounds(int slot) {
+        int triangle = staticTriangles[slot];
+        if (triangle < 0) {
+            writeBounds(staticColliders[slot], staticBounds, slot);
+            return;
+        }
+        double[] c = triangleScratch;
+        worldTriangle(staticColliders[slot], triangle, c, localTriangleScratch);
+        double m = boundsMargin;
+        staticBounds.set(slot,
+            Math.min(c[0], Math.min(c[3], c[6])) - m, Math.min(c[1], Math.min(c[4], c[7])) - m,
+            Math.min(c[2], Math.min(c[5], c[8])) - m, Math.max(c[0], Math.max(c[3], c[6])) + m,
+            Math.max(c[1], Math.max(c[4], c[7])) + m, Math.max(c[2], Math.max(c[5], c[8])) + m);
+    }
+
+    private final double[] triangleScratch = new double[9];
+    private final double[] localTriangleScratch = new double[9];
+
+    /**
+     * World-space corners of {@code triangle} of the concave collider, written to {@code out[0..8]}; {@code local} is
+     * scratch space for nine doubles.
+     */
+    void worldTriangle(int collider, int triangle, double[] out, double[] local) {
+        ((ConcaveShape) shapes[collider]).triangle(triangle, local, 0);
+        int p = POSE * collider;
+        double qx = poses[p + 3];
+        double qy = poses[p + 4];
+        double qz = poses[p + 5];
+        double qw = poses[p + 6];
+        for (int i = 0; i < 9; i += 3) {
+            double px = local[i] * poses[p + 7];
+            double py = local[i + 1] * poses[p + 8];
+            double pz = local[i + 2] * poses[p + 9];
+            double wx = 2 * (qy * pz - qz * py);
+            double wy = 2 * (qz * px - qx * pz);
+            double wz = 2 * (qx * py - qy * px);
+            out[i] = poses[p] + px + qw * wx + (qy * wz - qz * wy);
+            out[i + 1] = poses[p + 1] + py + qw * wy + (qz * wx - qx * wz);
+            out[i + 2] = poses[p + 2] + pz + qw * wz + (qx * wy - qy * wx);
+        }
+    }
+
     private void writeBounds(int collider, AabbArray target, int slot) {
         double[] box = boundsScratch;
         worldBounds(localBounds, 6 * collider, poses, POSE * collider, box);
-        target.set(slot, box[0], box[1], box[2], box[3], box[4], box[5]);
+        double m = boundsMargin;
+        target.set(slot, box[0] - m, box[1] - m, box[2] - m, box[3] + m, box[4] + m, box[5] + m);
     }
 
     private final double[] boundsScratch = new double[6];
@@ -416,6 +520,7 @@ public final class CollisionWorld {
         for (int slot = 0; slot < dynamicColliders.length; slot++) {
             pairSlot = slot;
             pairCollider = dynamicColliders[slot];
+            pairStamp++;
             double minX = dynamicBounds.get(slot, 0);
             double minY = dynamicBounds.get(slot, 1);
             double minZ = dynamicBounds.get(slot, 2);
@@ -435,7 +540,14 @@ public final class CollisionWorld {
     }
 
     private boolean staticPair(int slot) {
-        pair(pairCollider, staticColliders[slot]);
+        int collider = staticColliders[slot];
+        if (staticTriangles[slot] >= 0) {
+            if (pairSeen[collider] == pairStamp) {
+                return true; // another triangle of the same baked collider
+            }
+            pairSeen[collider] = pairStamp;
+        }
+        pair(pairCollider, collider);
         return true;
     }
 

@@ -4,8 +4,8 @@ Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
 Status: narrow phase between convex shapes, triangle meshes and heightfields with contacts,
-raycasts, and a collision world with broad phase and a narrow phase over pair ranges. Planned next:
-static mesh baking (milestone 3), then shape casts (milestone 4).
+raycasts, and a collision world (milestone 3): broad phase, narrow phase over pair ranges and
+optional static mesh baking. Planned next: shape casts (milestone 4).
 
 ## Usage
 
@@ -86,6 +86,12 @@ moves; dynamic colliders in another, refit every update and rebuilt when it has 
 is separate from any scene: poses are set directly or copied from a shared `TransformArray`. After
 `update()`, any number of threads can query concurrently, each with its own `CollisionQuery`.
 Pairs of two meshes or heightfields are left out.
+
+Large static geometry such as a track can be *baked*: `world.addStatic(trackMesh, pose, true)` puts
+its triangles into the static tree in world space, so raycasts and overlaps descend one tree
+instead of two. Results are the same; the cost is a static tree rebuild when baked geometry is
+added, removed or moved. When collecting contacts within a distance, set
+`world.setBoundsMargin(distance)` so nearby pairs are found before their bounds touch.
 
 ### Contacts for all pairs, in parallel
 

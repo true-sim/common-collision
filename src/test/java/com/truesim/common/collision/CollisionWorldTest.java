@@ -364,6 +364,27 @@ class CollisionWorldTest {
     }
 
     @Test
+    void boundsMarginFindsNearbyPairs() {
+        world.addDynamic(new SphereShape(1), Transform.IDENTITY);
+        world.addDynamic(new SphereShape(1), Transform.ofTranslation(Vec3.of(2.1, 0, 0)));
+        world.update();
+        PairBuffer pairs = new PairBuffer();
+        world.findPairs(pairs);
+        assertThat(pairs.size()).isZero();
+        world.setBoundsMargin(0.06);
+        assertThat(world.boundsMargin()).isEqualTo(0.06);
+        world.update();
+        world.findPairs(pairs);
+        assertThat(pairs.size()).isEqualTo(1);
+        ContactManifolds manifolds = new ContactManifolds(1);
+        manifolds.prepare(1);
+        world.newQuery().collide(pairs, 0, 1, 0.12, manifolds);
+        assertThat(manifolds.get(0, 0).distance()).isCloseTo(0.1, within(1e-9));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.setBoundsMargin(-1));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.setBoundsMargin(Double.NaN));
+    }
+
+    @Test
     void pairBuffer() {
         PairBuffer pairs = new PairBuffer(0);
         for (int i = 0; i < 10; i++) {
