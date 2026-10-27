@@ -6,9 +6,11 @@ import com.truesim.common.math.Transform;
 import com.truesim.common.math.Vec3;
 import com.truesim.common.math.spatial.Bvh;
 import com.truesim.common.math.spatial.RayHit;
+import java.util.Objects;
 
 /**
- * Queries against a {@link CollisionWorld} from one thread: raycasts and overlaps. Holds the working storage, so
+ * Queries against a {@link CollisionWorld} from one thread: raycasts, overlaps, and the narrow phase over ranges of
+ * broad-phase pairs ({@link #collide}). Holds the working storage, so
  * queries allocate nothing; create one per thread with {@link CollisionWorld#newQuery()}. Queries see the world as of
  * its last {@link CollisionWorld#update()}; several threads may query concurrently while nobody changes the world.
  */
@@ -27,6 +29,8 @@ public final class CollisionQuery {
     private final RaycastHit best = new RaycastHit();
     private final RayHit treeHit = new RayHit();
     private final ContactBuffer probe = new ContactBuffer(1);
+    private final Contact pairContact = new Contact();
+    private ContactBuffer pairContacts = new ContactBuffer(4);
     private final double[] queryPose = new double[CollisionWorld.POSE];
     private final double[] queryLocal = new double[6];
     private final double[] queryBounds = new double[6];
@@ -169,5 +173,57 @@ public final class CollisionQuery {
         found++;
         stopped = !visitor.visit(collider);
         return !stopped;
+    }
+
+    // ---------------------------------------------------------------- narrow phase over pairs
+
+    /**
+     * Runs the narrow phase for pairs {@code from} (inclusive) to {@code to} (exclusive) of {@code pairs}, writing
+     * each pair's contacts within {@code maxDistance} to its slots in {@code out}, which must be
+     * {@link ContactManifolds#prepare prepared} for all pairs. Contacts point from the pair's first collider to its
+     * second. Workers with their own queries may fill disjoint ranges of the same {@code out} concurrently.
+     */
+    public void collide(PairBuffer pairs, int from, int to, double maxDistance, ContactManifolds out) {
+        Objects.checkFromToIndex(from, to, Math.min(pairs.size(), out.size()));
+        if (pairContacts.capacity() != out.contactsPerPair()) {
+            resizePairContacts(out.contactsPerPair());
+        }
+        for (int pair = from; pair < to; pair++) {
+            collidePair(pair, pairs.first(pair), pairs.second(pair), maxDistance, out);
+        }
+    }
+
+    @AllowAllocation("when the contacts per pair change")
+    private void resizePairContacts(int capacity) {
+        pairContacts = new ContactBuffer(capacity);
+    }
+
+    private void collidePair(int pair, int a, int b, double maxDistance, ContactManifolds out) {
+        if (!world.isLive(a) || !world.isLive(b)) {
+            out.setCount(pair, 0); // removed since the pairs were found
+            return;
+        }
+        // The narrow phase wants the convex shape first: swap a moving mesh to B and flip the results back.
+        boolean flip = world.isConcave(a);
+        int convex = flip ? b : a;
+        int other = flip ? a : b;
+        double[] poses = world.poses;
+        int pc = CollisionWorld.POSE * convex;
+        int po = CollisionWorld.POSE * other;
+        ConvexShape shape = (ConvexShape) world.shapes[convex];
+        if (world.shapes[other] instanceof ConvexShape otherShape) {
+            boolean touching = narrow.queryPlaced(shape, poses, pc, otherShape, poses, po, pairContact) <= maxDistance;
+            if (touching) {
+                out.set(pair, 0, pairContact, false);
+            }
+            out.setCount(pair, touching ? 1 : 0);
+            return;
+        }
+        int count = narrow.contactsPlaced(shape, poses, pc, (ConcaveShape) world.shapes[other], poses, po, maxDistance,
+            pairContacts);
+        for (int k = 0; k < count; k++) {
+            out.set(pair, k, pairContacts.get(k), flip);
+        }
+        out.setCount(pair, count);
     }
 }

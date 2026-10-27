@@ -88,6 +88,24 @@ public final class Contact {
         return materialB;
     }
 
+    /** Copies {@code other} seen from the other side: A and B swapped, the normal reversed. */
+    void copyFlipped(Contact other) {
+        distance = other.distance;
+        normalX = -other.normalX;
+        normalY = -other.normalY;
+        normalZ = -other.normalZ;
+        ax = other.bx;
+        ay = other.by;
+        az = other.bz;
+        bx = other.ax;
+        by = other.ay;
+        bz = other.az;
+        featureA = other.featureB;
+        featureB = other.featureA;
+        materialA = other.materialB;
+        materialB = other.materialA;
+    }
+
     void copyFrom(Contact other) {
         distance = other.distance;
         normalX = other.normalX;
