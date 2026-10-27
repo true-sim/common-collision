@@ -299,6 +299,15 @@ public final class NarrowPhase {
         return coreDistance() <= poseA.margin + poseB.margin;
     }
 
+    /** {@link #query} with poses as ten doubles each, as in {@link #overlapsPlaced}. */
+    double queryPlaced(ConvexShape shapeA, double[] a, int ia, ConvexShape shapeB, double[] b, int ib, Contact contact) {
+        poseA.set(shapeA, a[ia], a[ia + 1], a[ia + 2], a[ia + 3], a[ia + 4], a[ia + 5], a[ia + 6], a[ia + 7], a[ia + 8],
+            a[ia + 9]);
+        poseB.set(shapeB, b[ib], b[ib + 1], b[ib + 2], b[ib + 3], b[ib + 4], b[ib + 5], b[ib + 6], b[ib + 7], b[ib + 8],
+            b[ib + 9]);
+        return solve(contact);
+    }
+
     /** {@link #contacts} with poses as ten doubles each, as in {@link #overlapsPlaced}. */
     int contactsPlaced(ConvexShape convex, double[] a, int ia, ConcaveShape concave, double[] b, int ib,
         double maxDistance, ContactBuffer out) {

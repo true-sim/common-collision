@@ -4,8 +4,8 @@ Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
 Status: narrow phase between convex shapes, triangle meshes and heightfields with contacts,
-raycasts, and a collision world with broad phase. Planned next: batch narrow phase in ranges for
-parallel jobs and static mesh baking (milestone 3), then shape casts (milestone 4).
+raycasts, and a collision world with broad phase and a narrow phase over pair ranges. Planned next:
+static mesh baking (milestone 3), then shape casts (milestone 4).
 
 ## Usage
 
@@ -86,6 +86,20 @@ moves; dynamic colliders in another, refit every update and rebuilt when it has 
 is separate from any scene: poses are set directly or copied from a shared `TransformArray`. After
 `update()`, any number of threads can query concurrently, each with its own `CollisionQuery`.
 Pairs of two meshes or heightfields are left out.
+
+### Contacts for all pairs, in parallel
+
+```java
+ContactManifolds manifolds = new ContactManifolds(4); // up to 4 contacts per pair
+world.findPairs(pairs);
+manifolds.prepare(pairs.size());                      // one thread
+// Any way of running ranges: a loop, threads, a job scheduler.
+query.collide(pairs, from, to, contactDistance, manifolds); // each worker: own query, own range
+```
+
+Every pair writes only its own slots, so the result is identical however the ranges are split and
+whichever thread finishes first: a parallel step gives exactly the single-threaded result. Contacts
+point from the pair's first collider to its second.
 
 ## Shapes
 
