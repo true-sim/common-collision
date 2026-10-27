@@ -48,6 +48,11 @@ public final class CollisionQuery {
     private final Bvh.RayTest dynamicRay;
     private final Bvh.Visitor staticOverlap;
     private final Bvh.Visitor dynamicOverlap;
+    private final Bvh.Visitor dynamicPairs;
+    private final Bvh.Visitor staticPairs;
+    private PairBuffer pairTarget;
+    private int pairSlot;
+    private int pairCollider;
     private int mask;
     private ConvexShape queryShape;
     private ColliderVisitor visitor;
@@ -61,6 +66,8 @@ public final class CollisionQuery {
         dynamicRay = this::dynamicRay;
         staticOverlap = this::staticOverlap;
         dynamicOverlap = this::dynamicOverlap;
+        dynamicPairs = this::dynamicPair;
+        staticPairs = this::staticPair;
     }
 
     // ---------------------------------------------------------------- raycasts
@@ -247,6 +254,60 @@ public final class CollisionQuery {
         found++;
         stopped = !visitor.visit(collider);
         return !stopped;
+    }
+
+    // ---------------------------------------------------------------- broad phase
+
+    /**
+     * Broad phase for the dynamic colliders in slots {@code from} (inclusive) to {@code to} (exclusive) of the last
+     * {@link CollisionWorld#update()}, up to {@link CollisionWorld#dynamicCount()}: appends their pairs to {@code out}
+     * in the order {@link CollisionWorld#findPairs} gives them. Workers can split the slots and concatenate their
+     * results in slot order to get exactly the single-threaded pairs.
+     */
+    public void findPairs(int from, int to, PairBuffer out) {
+        Objects.checkFromToIndex(from, to, world.dynamicCount());
+        if (seen.length < world.capacity()) {
+            growSeen(world.capacity());
+        }
+        pairTarget = out;
+        for (int slot = from; slot < to; slot++) {
+            pairSlot = slot;
+            pairCollider = world.dynamicColliders[slot];
+            stamp++;
+            double minX = world.dynamicBounds.get(slot, 0);
+            double minY = world.dynamicBounds.get(slot, 1);
+            double minZ = world.dynamicBounds.get(slot, 2);
+            double maxX = world.dynamicBounds.get(slot, 3);
+            double maxY = world.dynamicBounds.get(slot, 4);
+            double maxZ = world.dynamicBounds.get(slot, 5);
+            world.dynamicTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, dynamicPairs);
+            world.staticTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, staticPairs);
+        }
+    }
+
+    private boolean dynamicPair(int slot) {
+        if (slot > pairSlot) {
+            pair(world.dynamicColliders[slot]);
+        }
+        return true;
+    }
+
+    private boolean staticPair(int slot) {
+        int collider = world.staticColliders[slot];
+        if (world.staticTriangles[slot] >= 0) {
+            if (seen[collider] == stamp) {
+                return true; // another triangle of the same baked collider
+            }
+            seen[collider] = stamp;
+        }
+        pair(collider);
+        return true;
+    }
+
+    private void pair(int other) {
+        if (world.canCollide(pairCollider, other)) {
+            pairTarget.add(pairCollider, other);
+        }
     }
 
     // ---------------------------------------------------------------- narrow phase over pairs

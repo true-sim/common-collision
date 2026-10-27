@@ -214,4 +214,26 @@ class AllocationFreeTest {
             sink += query.overlap(probe, Transform.ofTranslation(Vec3.of(x[0], 0.5, 4)), -1, any);
         });
     }
+
+    @Test
+    void parallelSteps() {
+        CollisionWorld world = new CollisionWorld();
+        world.addStatic(HeightfieldShapeTest.hills(32, 32), Transform.IDENTITY, true);
+        for (int i = 0; i < 80; i++) {
+            world.addDynamic(i % 2 == 0 ? new SphereShape(0.6) : new BoxShape(Vec3.of(0.5, 0.4, 0.6)),
+                Transform.of(Vec3.of(0.8 * i % 60, 0.5 + i % 3, 2 + i % 20), Quat.fromYawPitchRoll(0.1 * i, 0.2, 0.3)));
+        }
+        world.update();
+        PairBuffer pairs = new PairBuffer();
+        ContactManifolds manifolds = new ContactManifolds(4);
+        try (com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(4)) {
+            ParallelCollision parallel = new ParallelCollision(world, jobs);
+            assertAllocationFree(() -> {
+                world.update();
+                parallel.findPairs(pairs);
+                parallel.collide(pairs, 0.05, manifolds);
+                sink += manifolds.totalContacts();
+            });
+        }
+    }
 }

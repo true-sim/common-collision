@@ -7,6 +7,7 @@ description = "Collision detection for true-sim: shapes, GJK/EPA, raycasts, cont
 
 dependencies {
     api("com.truesim.common:common-math:0.3.0")
+    api("com.truesim.common:common-jobs:0.1.0")
 }
 
 coverage {

@@ -52,6 +52,15 @@ public final class PairBuffer {
         size++;
     }
 
+    /** Appends all pairs of {@code other}, in order. */
+    void addAll(PairBuffer other) {
+        while (2 * (size + other.size) > pairs.length) {
+            grow();
+        }
+        System.arraycopy(other.pairs, 0, pairs, 2 * size, 2 * other.size);
+        size += other.size;
+    }
+
     @AllowAllocation("growing, rare")
     private void grow() {
         pairs = Arrays.copyOf(pairs, 2 * pairs.length);

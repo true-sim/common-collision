@@ -70,21 +70,8 @@ public final class CollisionWorld {
     private double rebuildThreshold = 1.5;
     private double boundsMargin;
 
-    // Pair finding.
-    private final Bvh.Visitor dynamicPairs;
-    private final Bvh.Visitor staticPairs;
-    private PairBuffer pairTarget;
-    private int pairSlot;
-    private int pairCollider;
-    // Baked colliders appear once per triangle in the static tree: report each pair once.
-    private long[] pairSeen = new long[0];
-    private long pairStamp;
-
-    @AllowAllocation("one pair visitor each per world")
-    public CollisionWorld() {
-        dynamicPairs = this::dynamicPair;
-        staticPairs = this::staticPair;
-    }
+    // Runs findPairs on the calling thread; workers use their own queries.
+    private final CollisionQuery pairQuery = new CollisionQuery(this);
 
     // ---------------------------------------------------------------- colliders
 
@@ -155,7 +142,6 @@ public final class CollisionWorld {
         userData = Arrays.copyOf(userData, capacity);
         sources = Arrays.copyOf(sources, capacity);
         free = Arrays.copyOf(free, capacity);
-        pairSeen = Arrays.copyOf(pairSeen, capacity);
     }
 
     /** Number of collider ids in use or freed so far: every id is below it. */
@@ -516,46 +502,18 @@ public final class CollisionWorld {
      */
     public void findPairs(PairBuffer out) {
         out.clear();
-        pairTarget = out;
-        for (int slot = 0; slot < dynamicColliders.length; slot++) {
-            pairSlot = slot;
-            pairCollider = dynamicColliders[slot];
-            pairStamp++;
-            double minX = dynamicBounds.get(slot, 0);
-            double minY = dynamicBounds.get(slot, 1);
-            double minZ = dynamicBounds.get(slot, 2);
-            double maxX = dynamicBounds.get(slot, 3);
-            double maxY = dynamicBounds.get(slot, 4);
-            double maxZ = dynamicBounds.get(slot, 5);
-            dynamicTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, dynamicPairs);
-            staticTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, staticPairs);
-        }
+        pairQuery.findPairs(0, dynamicColliders.length, out);
     }
 
-    private boolean dynamicPair(int slot) {
-        if (slot > pairSlot) {
-            pair(pairCollider, dynamicColliders[slot]);
-        }
-        return true;
+    /** Number of dynamic colliders as of the last {@link #update()}: the range {@link CollisionQuery#findPairs} splits. */
+    public int dynamicCount() {
+        return dynamicColliders.length;
     }
 
-    private boolean staticPair(int slot) {
-        int collider = staticColliders[slot];
-        if (staticTriangles[slot] >= 0) {
-            if (pairSeen[collider] == pairStamp) {
-                return true; // another triangle of the same baked collider
-            }
-            pairSeen[collider] = pairStamp;
-        }
-        pair(pairCollider, collider);
-        return true;
-    }
-
-    private void pair(int a, int b) {
+    /** Whether a pair of live colliders may collide: filters match and not both are meshes or heightfields. */
+    boolean canCollide(int a, int b) {
         // Colliders removed since the last update may still be in the trees.
-        if (isLive(a) && isLive(b) && (groups[a] & masks[b]) != 0 && (groups[b] & masks[a]) != 0
-            && !(isConcave(a) && isConcave(b))) {
-            pairTarget.add(a, b);
-        }
+        return isLive(a) && isLive(b) && (groups[a] & masks[b]) != 0 && (groups[b] & masks[a]) != 0
+            && !(isConcave(a) && isConcave(b));
     }
 }
