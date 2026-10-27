@@ -70,4 +70,19 @@ class AllocationFreeTest {
             sink += mesh.queryAabb(x[0], -1, 3, x[0] + 1.5, 1, 4.5, visitor);
         });
     }
+
+    @Test
+    void heightfieldQueries() {
+        HeightfieldShape field = HeightfieldShapeTest.hills(64, 64);
+        int[] materials = new int[3];
+        com.truesim.common.math.spatial.Bvh.Visitor visitor = triangle -> {
+            materials[field.material(triangle)]++;
+            return true;
+        };
+        double[] x = {0};
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 120 ? 0 : x[0] + 0.37;
+            sink += field.queryAabb(x[0], -0.5, 30, x[0] + 3, 0.5, 33, visitor);
+        });
+    }
 }

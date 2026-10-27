@@ -3,7 +3,7 @@
 Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
-Status: narrow phase between convex shapes, and triangle meshes. Planned next: heightfields,
+Status: narrow phase between convex shapes, triangle meshes and heightfields. Planned next:
 raycasts, contacts with triangles (milestone 2), a collision world with broad phase (milestone 3),
 then shape casts (milestone 4).
 
@@ -39,6 +39,10 @@ boolean touching = narrow.overlaps(car, carPose, post, postPose); // cheaper yes
 | `BoxShape(halfExtents)` | Box centered on the local origin |
 | `ConvexHullShape.of(points)` | Convex hull of a point list (tens of points) |
 | `TriangleMeshShape.of(vertices, indices, materials)` | Triangle mesh with a material id per triangle and its own BVH, shared by every collider that uses it |
+| `HeightfieldShape.of(samplesX, samplesZ, cellSizeX, cellSizeZ, heights, materials)` | Terrain grid with a material id per cell; the grid itself is the spatial index |
+
+Meshes and heightfields are `ConcaveShape`s: `queryAabb` finds the triangles near a local-space
+region, and each triangle has an index and a material id.
 
 Shapes are placed with a `Transform` (translation, rotation, scale). Non-uniform scale is
 supported: a scaled sphere is an ellipsoid.
