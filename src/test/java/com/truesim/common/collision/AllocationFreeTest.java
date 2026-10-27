@@ -55,4 +55,19 @@ class AllocationFreeTest {
             sink += narrow.query(sphere, ellipsoid, sphere, tb, contact);
         });
     }
+
+    @Test
+    void meshQueries() {
+        TriangleMeshShape mesh = TriangleMeshShapeTest.grid(32);
+        int[] materials = new int[4];
+        com.truesim.common.math.spatial.Bvh.Visitor visitor = triangle -> {
+            materials[mesh.material(triangle)]++;
+            return true;
+        };
+        double[] x = {0};
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 30 ? 0 : x[0] + 0.37;
+            sink += mesh.queryAabb(x[0], -1, 3, x[0] + 1.5, 1, 4.5, visitor);
+        });
+    }
 }
