@@ -20,7 +20,7 @@ import java.util.List;
  * int found = track.queryAabb(localBox, triangle -> { collide(triangle, track.material(triangle)); return true; });
  * }</pre>
  */
-public final class TriangleMeshShape implements Shape {
+public final class TriangleMeshShape implements ConcaveShape {
 
     private final double[] vertices;
     private final int[] indices;
@@ -87,6 +87,7 @@ public final class TriangleMeshShape implements Shape {
         return vertices.length / 3;
     }
 
+    @Override
     public int triangleCount() {
         return indices.length / 3;
     }
@@ -105,7 +106,7 @@ public final class TriangleMeshShape implements Shape {
             vertex(indices[3 * triangle]), vertex(indices[3 * triangle + 1]), vertex(indices[3 * triangle + 2]));
     }
 
-    /** Writes the triangle's corners a, b, c as nine doubles to {@code out[at..at + 8]}. */
+    @Override
     public void triangle(int triangle, double[] out, int at) {
         for (int corner = 0; corner < 3; corner++) {
             int v = 3 * indices[3 * triangle + corner];
@@ -115,6 +116,7 @@ public final class TriangleMeshShape implements Shape {
         }
     }
 
+    @Override
     public int material(int triangle) {
         return materials[triangle];
     }
@@ -124,12 +126,8 @@ public final class TriangleMeshShape implements Shape {
         return bvh.bounds();
     }
 
-    /** Visits the triangles whose bounds overlap the local-space box; returns how many were visited. */
+    @Override
     public int queryAabb(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Bvh.Visitor visitor) {
         return bvh.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, visitor);
-    }
-
-    public int queryAabb(Aabb localBox, Bvh.Visitor visitor) {
-        return bvh.queryAabb(localBox, visitor);
     }
 }
