@@ -93,6 +93,21 @@ instead of two. Results are the same; the cost is a static tree rebuild when bak
 added, removed or moved. When collecting contacts within a distance, set
 `world.setBoundsMargin(distance)` so nearby pairs are found before their bounds touch.
 
+### On all cores, deterministically
+
+```java
+try (JobSystem jobs = JobSystem.ofAvailableProcessors()) {          // common-jobs
+    ParallelCollision parallel = new ParallelCollision(world, jobs);
+    world.update();
+    parallel.findPairs(pairs);                     // same pairs, same order as world.findPairs
+    parallel.collide(pairs, contactDistance, manifolds); // same contacts, bit for bit
+}
+```
+
+The broad phase splits the dynamic colliders into chunks whose pairs are joined in chunk order; the
+narrow phase splits the pairs, and each pair writes only its own slots. The result is identical on
+1, 2, 3 or 100 threads.
+
 ### Contacts for all pairs, in parallel
 
 ```java

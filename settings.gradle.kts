@@ -21,10 +21,12 @@ rootProject.name = "common-collision"
 providers.gradleProperty("truesim.build-logic").orNull?.let { includeBuild(it) }
 // Develop against a local common-math checkout: -Ptruesim.common-math=../common-math
 providers.gradleProperty("truesim.common-math").orNull?.let { includeBuild(it) }
+// Develop against a local common-jobs checkout: -Ptruesim.common-jobs=../common-jobs
+providers.gradleProperty("truesim.common-jobs").orNull?.let { includeBuild(it) }
 
 dependencyResolutionManagement {
     repositories {
-        for (repo in listOf("build-logic", "common-math")) {
+        for (repo in listOf("build-logic", "common-math", "common-jobs")) {
             maven("https://maven.pkg.github.com/true-sim/$repo") {
                 credentials {
                     username = providers.gradleProperty("gpr.user").orElse(providers.environmentVariable("GITHUB_ACTOR")).orNull
