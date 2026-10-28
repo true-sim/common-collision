@@ -170,6 +170,49 @@ class NarrowPhaseTest {
         assertThat(narrow.query(box, forward, capsule, b, contact)).isNegative();
     }
 
+    /** Lowest world y of the shape at the pose, from its exact support function. */
+    private static double lowest(ConvexShape shape, Transform pose) {
+        Pose placed = new Pose();
+        placed.set(shape, pose);
+        double[] point = new double[3];
+        placed.coreSupport(0, -1, 0, point, 0);
+        return point[1] - placed.margin;
+    }
+
+    /** Signed distances of shapes lifted to exact gaps above the floor (top at y = 0) of the given half size. */
+    private void assertGapsAboveFloor(ConvexShape shape, Vec3 scale, double size, double tolerance) {
+        BoxShape floor = new BoxShape(Vec3.of(size, 1, size));
+        Transform floorPose = Transform.ofTranslation(Vec3.of(0, -1, 0));
+        Rng rng = Rng.seeded(9);
+        for (double gap : new double[] {1e-1, 1e-3, 1e-5, 1e-7, 1e-9}) {
+            for (int i = 0; i < 100; i++) {
+                Transform pose = Transform.of(Vec3.of(rng.nextDouble(-3, 3), 0, rng.nextDouble(-3, 3)),
+                    i % 4 == 0 ? Quat.IDENTITY : rng.nextRotation(), scale);
+                pose = pose.withTranslation(pose.translation().add(Vec3.of(0, gap - lowest(shape, pose), 0)));
+                assertThat(narrow.query(shape, pose, floor, floorPose, contact)).isCloseTo(gap, within(tolerance));
+                assertThat(contact.normalY()).isCloseTo(-1, within(1e-15));
+            }
+        }
+    }
+
+    @Test
+    void nearlyTouchingLargeShapes() {
+        // A box or hull just above a floor 10 km wide: GJK's point on the floor face is a weighted sum of corners
+        // 10 km away. Distances were off by 1e-6 and normals by 4e-3 at a 1e-9 gap; now they are exact.
+        assertGapsAboveFloor(new BoxShape(Vec3.of(0.5, 0.3, 0.7)), Vec3.ONE, 1e4, 1e-15);
+        assertGapsAboveFloor(ConvexHullShape.of(List.of(Vec3.of(-1, -0.5, 0), Vec3.of(1, -0.5, 0.2),
+            Vec3.of(0, 1, -0.3), Vec3.of(0.1, -0.2, 1.2), Vec3.of(-0.4, 0.3, -1))), Vec3.ONE, 1e4, 1e-15);
+    }
+
+    @Test
+    void nearlyTouchingSmoothCores() {
+        // Non-uniformly scaled spheres and capsules have smooth cores without a margin, on which GJK converges
+        // slowly. Distances near contact were off by 1e-7 (on a 20 m floor) to 1e-4 (on a 20 km one).
+        assertGapsAboveFloor(new SphereShape(0.6), Vec3.of(1.5, 0.7, 1), 10, 1e-13);
+        assertGapsAboveFloor(new CapsuleShape(0.8, 0.3), Vec3.of(1.5, 0.7, 1), 10, 1e-13);
+        assertGapsAboveFloor(new SphereShape(0.6), Vec3.of(1.5, 0.7, 1), 1e4, 1e-10);
+    }
+
     // ---------------------------------------------------------------- boxes
 
     @Test

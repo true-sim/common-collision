@@ -437,9 +437,8 @@ public final class NarrowPhase {
     private static final double MISS = Double.POSITIVE_INFINITY;
     /**
      * Distance at which a cast shape counts as touching its target. Below CORE_EPSILON, so a cast that ends with sharp
-     * cores touching takes its normal from an EPA face. GJK's normal is the direction of the closest-point difference,
-     * a difference of support points as large as the shapes' coordinates: its error is their rounding over the
-     * separation, about 4e-16 * size / separation, and grows without bound as the shapes touch.
+     * cores touching takes its normal from an EPA face. Nearly touching, GJK's normal for an edge or vertex is a
+     * difference of support points as large as the shapes' coordinates, wrong by their rounding over the separation.
      */
     private static final double CAST_TOLERANCE = 1e-12;
 
@@ -561,11 +560,11 @@ public final class NarrowPhase {
      * divided by how fast the motion closes it. That is Newton's method on the distance, which is convex along a
      * straight motion, so it never passes the first touch: exact in one step onto flat faces, quickly convergent onto
      * curved ones. The closing speed is never taken below the secant over the last step, which bounds it from above.
-     * The cast is as exact as the distance query, and can end inside the target by its error: near contact GJK's
-     * distance is good to about 1e-7 on smooth cores without a margin (non-uniformly scaled spheres and capsules),
-     * where it converges slowly, and to about 1e-9 of their size on very large shapes. Returns the time of impact,
-     * with the contact there in the scratch contact, or MISS when A moves away from B, passes {@code limit} or the
-     * steps run out.
+     * The cast is as exact as the distance query, and can end inside the target by its rounding: about 1e-15 of the
+     * shapes' size, up to 1e-10 on smooth cores without a margin (non-uniformly scaled spheres and capsules), where
+     * EPA decides contact on a polytope approximating the curved surface. Returns the time of impact, with the
+     * contact there in the scratch contact, or MISS when A moves away from B, passes {@code limit} or the steps run
+     * out.
      */
     private double sweep(double limit) {
         double t = 0;
@@ -579,8 +578,8 @@ public final class NarrowPhase {
                 return step > 0 || approach > CAST_TOLERANCE * castSpeed ? t : MISS;
             }
             if (step > 0) {
-                // Nearly touching, the normal is rounding noise over a tiny separation, and on a grazing motion that
-                // noise can swamp the closing speed. The distance is convex along the motion, so the secant over the
+                // Nearly touching, GJK's normal for an edge or vertex carries rounding over a tiny separation, which
+                // on a grazing motion can swamp the closing speed. The distance is convex along the motion, so the secant over the
                 // last step is at least the closing speed here: with it the step never passes the first touch.
                 approach = Math.max(approach, (previousDistance - distance) / (t - previousT));
             }
@@ -624,6 +623,7 @@ public final class NarrowPhase {
         double dz = poseA.centerZ - poseB.centerZ;
         boolean same = dx == 0 && dy == 0 && dz == 0;
         count = 0;
+        previousX = Double.NaN;
         addSupport(same ? 1 : dx, dy, dz);
         lambda[0] = 1;
         vx = w[0];
@@ -637,8 +637,9 @@ public final class NarrowPhase {
             addSupport(-vx, -vy, -vz);
             int n = 3 * (count - 1);
             double vw = vx * w[n] + vy * w[n + 1] + vz * w[n + 2];
-            if (vv - vw <= RELATIVE_TOLERANCE * vv) {
-                count--; // no point closer to the origin exists: converged
+            if (vv - vw <= RELATIVE_TOLERANCE * vv || repeated(n)) {
+                // No point closer to the origin exists, or rounding keeps GJK from getting closer: converged.
+                count--;
                 return Math.sqrt(vv);
             }
             solve();
@@ -648,6 +649,24 @@ public final class NarrowPhase {
         }
         return Math.sqrt(vx * vx + vy * vy + vz * vz);
     }
+
+    /**
+     * Whether the support point just added at {@code w[n]} is the one added last time, which the simplex then dropped:
+     * GJK would cycle. That happens once the remaining gain is below rounding, which on large shapes is well above the
+     * relative tolerance. On smooth cores the support point keeps moving, and GJK goes on converging.
+     */
+    private boolean repeated(int n) {
+        boolean repeated = previousX == w[n] && previousY == w[n + 1] && previousZ == w[n + 2];
+        previousX = w[n];
+        previousY = w[n + 1];
+        previousZ = w[n + 2];
+        return repeated;
+    }
+
+    /** The support point added in the previous GJK iteration. */
+    private double previousX;
+    private double previousY;
+    private double previousZ;
 
     /** Adds the Minkowski difference support point in direction d as simplex vertex {@code count}. */
     private void addSupport(double dx, double dy, double dz) {
@@ -688,6 +707,30 @@ public final class NarrowPhase {
             }
         }
         count = kept;
+        if (kept == 3) {
+            planeProjection();
+        }
+    }
+
+    /**
+     * v as the projection of the origin onto the plane of the simplex triangle. The weighted sum of the corners is the
+     * same point, but on large shapes it is a small vector from cancelling large ones; the plane normal comes from
+     * the edges and keeps its direction to rounding of their own length.
+     */
+    private void planeProjection() {
+        double e1x = w[3] - w[0];
+        double e1y = w[4] - w[1];
+        double e1z = w[5] - w[2];
+        double e2x = w[6] - w[0];
+        double e2y = w[7] - w[1];
+        double e2z = w[8] - w[2];
+        double nx = e1y * e2z - e1z * e2y;
+        double ny = e1z * e2x - e1x * e2z;
+        double nz = e1x * e2y - e1y * e2x;
+        double f = (nx * w[0] + ny * w[1] + nz * w[2]) / (nx * nx + ny * ny + nz * nz);
+        vx = nx * f;
+        vy = ny * f;
+        vz = nz * f;
     }
 
     private void segment(int i, int j) {
