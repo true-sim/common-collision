@@ -1,6 +1,7 @@
 pluginManagement {
-    // Develop against a local build-logic checkout: -Ptruesim.build-logic=../build-logic
-    providers.gradleProperty("truesim.build-logic").orNull?.let { includeBuild(it) }
+    // Use ../build-logic when present; override with -Ptruesim.build-logic=<path> (or false).
+    providers.gradleProperty("truesim.build-logic").orElse("../build-logic").get()
+        .takeIf { file(it).isDirectory }?.let { includeBuild(it) }
     repositories {
         gradlePluginPortal()
         maven("https://maven.pkg.github.com/true-sim/build-logic") {
@@ -18,15 +19,15 @@ plugins {
 
 rootProject.name = "common-collision"
 
-providers.gradleProperty("truesim.build-logic").orNull?.let { includeBuild(it) }
-// Develop against a local common-math checkout: -Ptruesim.common-math=../common-math
-providers.gradleProperty("truesim.common-math").orNull?.let { includeBuild(it) }
-// Develop against a local common-jobs checkout: -Ptruesim.common-jobs=../common-jobs
-providers.gradleProperty("truesim.common-jobs").orNull?.let { includeBuild(it) }
+val truesimRepos = listOf("build-logic", "common-math", "common-jobs")
+for (repo in truesimRepos) {
+    providers.gradleProperty("truesim.$repo").orElse("../$repo").get()
+        .takeIf { file(it).isDirectory }?.let { includeBuild(it) }
+}
 
 dependencyResolutionManagement {
     repositories {
-        for (repo in listOf("build-logic", "common-math", "common-jobs")) {
+        for (repo in truesimRepos) {
             maven("https://maven.pkg.github.com/true-sim/$repo") {
                 credentials {
                     username = providers.gradleProperty("gpr.user").orElse(providers.environmentVariable("GITHUB_ACTOR")).orNull
