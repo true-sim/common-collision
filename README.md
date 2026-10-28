@@ -158,11 +158,8 @@ supported: a scaled sphere is an ellipsoid.
 ./gradlew build
 ```
 
-To develop against local checkouts of build-logic and common-math:
-
-```
-./gradlew build -Ptruesim.build-logic=../build-logic -Ptruesim.common-math=../common-math
-```
+Sibling checkouts (`../build-logic`, `../common-math`, `../common-jobs`) are used automatically when
+present (override with `-Ptruesim.<repo>=<path>`); otherwise they are fetched from GitHub Packages.
 
 The build enforces platform independence, allocation-free code (checked at build time and by
 `AllocationFreeTest`) and 100% line and branch coverage.
