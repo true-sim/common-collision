@@ -27,7 +27,7 @@ public final class ShapeCastHit {
     int collider = NONE;
 
     /**
-     * Motion parameter of the impact: the shape touches the target (comes within 1e-6 of it) after moving by
+     * Motion parameter of the impact: the shape touches the target after moving by
      * {@code distance * direction}, so with a unit direction this is the distance travelled. 0 when the shape starts
      * touching or overlapping the target and moves into it; infinite after a miss.
      */
@@ -45,7 +45,7 @@ public final class ShapeCastHit {
     }
 
     /**
-     * Point on the moved shape's surface where it touches the target: within 1e-6 of {@link #point()}, unless the shape
+     * Point on the moved shape's surface where it touches the target: {@link #point()} up to rounding, unless the shape
      * started inside the target.
      */
     public Vec3 shapePoint() {

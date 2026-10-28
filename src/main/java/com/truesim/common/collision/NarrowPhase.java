@@ -436,10 +436,12 @@ public final class NarrowPhase {
 
     private static final double MISS = Double.POSITIVE_INFINITY;
     /**
-     * Distance at which a cast shape counts as touching its target. Casts aim at half of it, so they stop just short of
-     * contact, where the distance query still gives a clean normal.
+     * Distance at which a cast shape counts as touching its target. Below CORE_EPSILON, so a cast that ends with sharp
+     * cores touching takes its normal from an EPA face. GJK's normal is the direction of the closest-point difference,
+     * a difference of support points as large as the shapes' coordinates: its error is their rounding over the
+     * separation, about 4e-16 * size / separation, and grows without bound as the shapes touch.
      */
-    private static final double CAST_TOLERANCE = 1e-6;
+    private static final double CAST_TOLERANCE = 1e-12;
 
     private final double[] bounds = new double[6];
     private final Bvh.Visitor castVisitor;
@@ -457,10 +459,10 @@ public final class NarrowPhase {
      * Sweeps the convex shape from {@code pose} along {@code direction} against the target: whether it hits within
      * {@code maxDistance} (finite), with the first time of impact, normal and touching points written to {@code hit}.
      * The shape moves without turning; the hit is at parameter {@code t} of the motion {@code t * direction}, where the
-     * shape is within 1e-6 of the target but not yet inside it. A shape that starts within that distance of the target,
-     * or overlapping it, hits at 0 if the motion goes into the target, and not at all if it slides along or leaves it:
-     * a shape resting on the ground can be cast sideways. Against meshes and heightfields the nearest triangle wins,
-     * and seams between smooth or concave triangles report the face normal, as for contacts.
+     * shape touches the target, up to rounding. A shape that starts touching or overlapping the target hits at 0 if
+     * the motion goes into the target, and not at all if it slides along or leaves it: a shape resting on the ground
+     * can be cast sideways. Against meshes and heightfields the nearest triangle wins, and seams between smooth or
+     * concave triangles report the face normal, as for contacts.
      */
     public boolean cast(ConvexShape shape, Transform pose, Vec3 direction, double maxDistance, Shape target,
         Transform targetPose, ShapeCastHit hit) {
@@ -555,14 +557,20 @@ public final class NarrowPhase {
     }
 
     /**
-     * Conservative advancement of A along the cast direction from its start: each step moves A by its distance to B,
-     * less half the tolerance, divided by how fast the motion closes it. That is Newton's method on the distance, which
-     * is convex along a straight motion, so it never passes the first touch. Returns the time of impact, with the
-     * contact there in the scratch contact, or MISS when A moves away from B, passes {@code limit} or the steps run
-     * out.
+     * Conservative advancement of A along the cast direction from its start: each step moves A by its distance to B
+     * divided by how fast the motion closes it. That is Newton's method on the distance, which is convex along a
+     * straight motion, so it never passes the first touch: exact in one step onto flat faces, quickly convergent onto
+     * curved ones. The closing speed is never taken below the secant over the last step, which bounds it from above.
+     * The cast is as exact as the distance query, and can end inside the target by its error: near contact GJK's
+     * distance is good to about 1e-7 on smooth cores without a margin (non-uniformly scaled spheres and capsules),
+     * where it converges slowly, and to about 1e-9 of their size on very large shapes. Returns the time of impact,
+     * with the contact there in the scratch contact, or MISS when A moves away from B, passes {@code limit} or the
+     * steps run out.
      */
     private double sweep(double limit) {
         double t = 0;
+        double previousT = 0;
+        double previousDistance = 0;
         for (int step = 0; step < maxIterations; step++) {
             double distance = solve(scratch);
             double approach = scratch.normalX * castDx + scratch.normalY * castDy + scratch.normalZ * castDz;
@@ -570,10 +578,18 @@ public final class NarrowPhase {
                 // Starting in contact is a hit only when moving into the target, by more than rounding.
                 return step > 0 || approach > CAST_TOLERANCE * castSpeed ? t : MISS;
             }
+            if (step > 0) {
+                // Nearly touching, the normal is rounding noise over a tiny separation, and on a grazing motion that
+                // noise can swamp the closing speed. The distance is convex along the motion, so the secant over the
+                // last step is at least the closing speed here: with it the step never passes the first touch.
+                approach = Math.max(approach, (previousDistance - distance) / (t - previousT));
+            }
             if (approach <= 0) {
                 return MISS; // moving apart: along a straight motion the distance never shrinks again
             }
-            t += (distance - CAST_TOLERANCE / 2) / approach;
+            previousT = t;
+            previousDistance = distance;
+            t += distance / approach;
             if (t > limit) {
                 return MISS;
             }
@@ -880,6 +896,13 @@ public final class NarrowPhase {
             nx = (ew[4] - ew[1]) * (ew[8] - ew[2]) - (ew[5] - ew[2]) * (ew[7] - ew[1]);
             ny = (ew[5] - ew[2]) * (ew[6] - ew[0]) - (ew[3] - ew[0]) * (ew[8] - ew[2]);
             nz = (ew[3] - ew[0]) * (ew[7] - ew[1]) - (ew[4] - ew[1]) * (ew[6] - ew[0]);
+            // The plane has two sides; the normal from A to B is the one the cores' difference lies behind. That also
+            // orients a triangle that only looks flat, being tiny, as GJK leaves on a smooth core touching.
+            if (differenceSupport(nx, ny, nz) > differenceSupport(-nx, -ny, -nz)) {
+                nx = -nx;
+                ny = -ny;
+                nz = -nz;
+            }
         } else {
             // Prefer the direction from A to B; for a segment, make it perpendicular.
             nx = poseB.centerX - poseA.centerX;
@@ -908,6 +931,14 @@ public final class NarrowPhase {
         double length = Math.sqrt(nx * nx + ny * ny + nz * nz);
         write(contact, nx / length, ny / length, nz / length, 0);
         return contact.distance;
+    }
+
+    /** How far the cores' difference reaches in direction d: the support point of A - B, dotted with d. */
+    private double differenceSupport(double dx, double dy, double dz) {
+        poseA.coreSupport(dx, dy, dz, support, 0);
+        double reach = support[0] * dx + support[1] * dy + support[2] * dz;
+        poseB.coreSupport(-dx, -dy, -dz, support, 0);
+        return reach - (support[0] * dx + support[1] * dy + support[2] * dz);
     }
 
     private int addVertex(double nx, double ny, double nz) {

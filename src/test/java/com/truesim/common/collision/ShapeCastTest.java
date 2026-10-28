@@ -15,8 +15,13 @@ import org.junit.jupiter.api.Test;
 class ShapeCastTest {
 
     private static final double EPS = 1e-9;
-    /** How close casts come to the target. */
-    private static final double TOUCH = 1e-6;
+    /** How exactly casts touch the target. */
+    private static final double TOUCH = 1e-9;
+    /**
+     * Precision of the distance query near contact on non-uniformly scaled round shapes, smooth cores without a margin
+     * where GJK converges slowly: measured up to 2e-7.
+     */
+    private static final double SMOOTH_CORE = 1e-6;
 
     private final NarrowPhase narrow = new NarrowPhase();
     private final NarrowPhase check = new NarrowPhase();
@@ -68,9 +73,9 @@ class ShapeCastTest {
             return;
         }
         assertThat(hit.distance()).isBetween(0.0, max);
-        // Close to the target, but not inside it.
-        assertThat(distanceAt(shape, pose, direction, hit.distance(), target, targetPose)).isBetween(-1e-12, TOUCH);
-        assertThat(hit.point().sub(hit.shapePoint()).length()).isLessThanOrEqualTo(TOUCH);
+        // Touching the target, up to rounding and to the distance query's precision.
+        assertThat(distanceAt(shape, pose, direction, hit.distance(), target, targetPose)).isBetween(-SMOOTH_CORE, TOUCH);
+        assertThat(hit.point().sub(hit.shapePoint()).length()).isLessThanOrEqualTo(SMOOTH_CORE);
         assertThat(hit.normal().length()).isCloseTo(1, within(EPS));
         // Moving a little along the normal from the impact separates the shapes, unless the normal is a smoothed one.
         if (hit.triangle() == ShapeCastHit.NONE) {
@@ -89,7 +94,6 @@ class ShapeCastTest {
         Transform at = Transform.ofTranslation(Vec3.of(10, 0, 0));
         assertThat(narrow.cast(ball, Transform.IDENTITY, Vec3.of(1, 0, 0), 100, target, at, hit)).isTrue();
         assertThat(hit.distance()).isCloseTo(7, within(TOUCH));
-        assertThat(hit.distance()).isLessThan(7); // just short of touching
         assertThat(hit.isHit()).isTrue();
         assertVec(hit.point(), 8, 0, 0, EPS);
         assertVec(hit.shapePoint(), 8, 0, 0, TOUCH);
@@ -136,10 +140,8 @@ class ShapeCastTest {
             assertThat(found).isEqualTo(expected <= 30);
             if (found) {
                 hits++;
-                // Just short of the inflated sphere: in time when grazing, but always within TOUCH in space.
-                assertThat(hit.distance()).isLessThanOrEqualTo(expected).isCloseTo(expected, within(1e-3));
+                assertThat(hit.distance()).isCloseTo(expected, within(TOUCH));
                 Vec3 touch = start.add(direction.scale(hit.distance()));
-                assertThat(touch.sub(center).length() - r - radius).isBetween(0.0, TOUCH);
                 assertThat(hit.normal().dot(touch.sub(center).normalize())).isCloseTo(1, within(1e-6));
             }
         }
@@ -168,6 +170,40 @@ class ShapeCastTest {
             hits += hit.isHit() ? 1 : 0;
         }
         assertThat(hits).isGreaterThan(150);
+    }
+
+    /** Lowest y of the box's corners at the pose. */
+    private static double lowest(BoxShape box, Transform pose) {
+        Vec3 h = box.halfExtents();
+        double lowest = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < 8; i++) {
+            lowest = Math.min(lowest, pose.transformPoint(Vec3.of((i & 1) == 0 ? -h.x() : h.x(),
+                (i & 2) == 0 ? -h.y() : h.y(), (i & 4) == 0 ? -h.z() : h.z())).y());
+        }
+        return lowest;
+    }
+
+    @Test
+    void grazingHitsAreExact() {
+        // Boxes gliding down at a shallow angle onto a flat floor, face first or corner first: the exact time of impact
+        // and the floor's normal, however shallow the angle. On a large floor GJK's normal is noise when nearly
+        // touching; without the secant bound it once let a step overshoot by 0.015 here (into the floor by 1.8e-4).
+        BoxShape box = new BoxShape(Vec3.of(0.5, 0.3, 0.7));
+        Rng rng = Rng.seeded(13);
+        for (double size : new double[] {100, 1e4}) {
+            BoxShape floor = new BoxShape(Vec3.of(size, 1, size));
+            Transform floorPose = Transform.ofTranslation(Vec3.of(0, -1, 0));
+            for (int i = 0; i < 300; i++) {
+                Transform pose = Transform.of(Vec3.of(rng.nextDouble(-3, 3), 0, rng.nextDouble(-3, 3)),
+                    i % 2 == 0 ? Quat.IDENTITY : rng.nextRotation());
+                pose = pose.withTranslation(pose.translation().add(Vec3.of(0, rng.nextDouble(0.5, 1.5) - lowest(box, pose), 0)));
+                Vec3 direction = Vec3.of(rng.nextDouble(-1, 1), -rng.nextDouble(0.01, 0.1), rng.nextDouble(-1, 1)).normalize();
+                double expected = lowest(box, pose) / -direction.y();
+                assertThat(narrow.cast(box, pose, direction, 200, floor, floorPose, hit)).isTrue();
+                assertThat(hit.distance()).isCloseTo(expected, within(size < 1e3 ? 1e-9 : 1e-3));
+                assertThat(hit.normal().dot(Vec3.UP)).isCloseTo(1, within(1e-12));
+            }
+        }
     }
 
     @Test

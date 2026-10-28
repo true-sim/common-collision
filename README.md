@@ -74,12 +74,12 @@ query.shapeCast(capsule, start, Vec3.FORWARD, 2.0, mask, hit); // against a worl
 
 A convex shape is swept, without turning, along a straight line against any shape or a whole world:
 the first time of impact, the target's normal facing the shape, and the touching points on both.
-Casts use conservative advancement on the narrow phase's distance query, which never passes the
-first touch: they stop within 1e-6 of the target, never inside it. A shape that starts touching or
-overlapping the target hits at distance 0 when it moves into it (with the normal that separates
-them fastest), and not at all when it slides along or leaves it, so a shape resting on the ground
-can be cast sideways. Against
-meshes and heightfields the nearest triangle wins, and seams report the face normal as for contacts.
+Casts use conservative advancement on the narrow phase's distance query: Newton's method on the
+distance, which never passes the first touch and is exact in one step onto flat faces. A shape that
+starts touching or overlapping the target hits at distance 0 when it moves into it (with the normal
+that separates them fastest), and not at all when it slides along or leaves it, so a shape resting
+on the ground can be cast sideways. Against meshes and heightfields the nearest triangle wins, and
+seams report the face normal as for contacts.
 World casts check the colliders whose bounds overlap the swept bounds, so long casts cost more.
 
 ## Collision world

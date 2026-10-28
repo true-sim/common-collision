@@ -149,6 +149,27 @@ class NarrowPhaseTest {
         assertThat(point.point(0)).isEqualTo(Vec3.of(0, 1, 0));
     }
 
+    @Test
+    void touchingASmoothCoreGivesAnOrientedNormal() {
+        // A box exactly touching a non-uniformly scaled capsule, whose core is smooth: GJK ends on a tiny simplex
+        // that EPA takes for a flat difference. The normal of its plane must still point from A to B.
+        BoxShape box = new BoxShape(Vec3.of(0.5, 0.9, 0.4));
+        Transform a = Transform.of(Vec3.of(1.2979997711026154, 1.1404266901724924, 0.27071129140130407),
+            new Quat(0.55157517061004850, 0.49248825037001090, 0.35024270443132040, 0.57493495493543980));
+        Transform b = Transform.of(Vec3.of(-0.012831114508184305, 0.71353935409837810, -0.32316899406792743),
+            new Quat(-0.59396871106181000, -0.54215074520006370, 0.58207080782957350, -0.12028014978048267),
+            Vec3.of(1.5, 0.7, 1));
+        CapsuleShape capsule = new CapsuleShape(0.8, 0.3);
+        assertThat(narrow.query(box, a, capsule, b, contact)).isCloseTo(0, within(EPS));
+        Vec3 normal = contact.normal();
+        assertThat(normal.dot(b.translation().sub(a.translation()))).isPositive();
+        // Moving A back along the normal separates them; moving it forward pushes them together.
+        Transform back = a.withTranslation(a.translation().sub(normal.scale(1e-4)));
+        assertThat(narrow.query(box, back, capsule, b, contact)).isCloseTo(1e-4, within(1e-9));
+        Transform forward = a.withTranslation(a.translation().add(normal.scale(1e-4)));
+        assertThat(narrow.query(box, forward, capsule, b, contact)).isNegative();
+    }
+
     // ---------------------------------------------------------------- boxes
 
     @Test
