@@ -50,6 +50,16 @@ final class Pose {
         centerZ = tz;
     }
 
+    /** Moves the shape to translation ({@code x}, {@code y}, {@code z}), keeping its rotation and scale. */
+    void moveTo(double x, double y, double z) {
+        tx = x;
+        ty = y;
+        tz = z;
+        centerX = x;
+        centerY = y;
+        centerZ = z;
+    }
+
     /** Writes the world-space core point furthest in world direction d to {@code out[at..at + 2]}. */
     void coreSupport(double dx, double dy, double dz, double[] out, int at) {
         // Local direction: scale times inverse rotation of d (scale is diagonal, so its transpose is itself).

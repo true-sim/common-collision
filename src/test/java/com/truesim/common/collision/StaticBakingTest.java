@@ -87,6 +87,29 @@ class StaticBakingTest {
             assertThat(foundB).isEqualTo(foundA);
             assertThat(countB).isEqualTo(countA);
         }
+        ShapeCastHit castA = new ShapeCastHit();
+        ShapeCastHit castB = new ShapeCastHit();
+        int casts = 0;
+        for (int i = 0; i < 200; i++) {
+            ConvexShape shape = i % 2 == 0 ? new SphereShape(rng.nextDouble(0.3, 1)) : new BoxShape(Vec3.of(1, 0.5, 2));
+            Transform pose = Transform.of(
+                Vec3.of(rng.nextDouble(-6, 50), rng.nextDouble(3, 8), rng.nextDouble(-6, 20)), rng.nextRotation());
+            Vec3 direction = Vec3.of(rng.nextDouble(-1, 1), -1, rng.nextDouble(-1, 1));
+            int mask = i % 7 == 0 ? 2 : -1;
+            boolean foundA = a.shapeCast(shape, pose, direction, 10, mask, castA);
+            assertThat(b.shapeCast(shape, pose, direction, 10, mask, castB)).isEqualTo(foundA);
+            if (foundA) {
+                casts++;
+                assertThat(castB.distance()).isEqualTo(castA.distance());
+                assertThat(castB.collider()).isEqualTo(castA.collider());
+                if (castB.triangle() == castA.triangle()) {
+                    assertThat(castB.material()).isEqualTo(castA.material());
+                    assertThat(castB.normal()).isEqualTo(castA.normal());
+                    assertThat(castB.point()).isEqualTo(castA.point());
+                }
+            }
+        }
+        assertThat(casts).isGreaterThan(50);
         assertSameContacts(plain, baked);
     }
 

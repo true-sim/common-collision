@@ -114,6 +114,28 @@ class AllocationFreeTest {
         });
     }
 
+    private final ShapeCastHit castHit = new ShapeCastHit();
+
+    @Test
+    void shapeCasts() {
+        BoxShape box = new BoxShape(Vec3.of(0.5, 0.4, 0.8));
+        CapsuleShape capsule = new CapsuleShape(1, 0.5);
+        TriangleMeshShape mesh = TriangleMeshShapeTest.grid(16);
+        HeightfieldShape field = HeightfieldShapeTest.hills(32, 32);
+        Quat rotation = Quat.fromYawPitchRoll(0.3, 0.2, 0.1);
+        double[] x = {0};
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 10 ? 0 : x[0] + 0.01;
+            Transform pose = Transform.of(Vec3.of(3 + x[0], 4, 4), rotation);
+            narrow.cast(box, pose, Vec3.of(0.1, -1, 0), 10, capsule, Transform.ofTranslation(Vec3.of(4, 0, 4)), castHit);
+            sink += castHit.distance();
+            narrow.cast(box, pose, Vec3.of(0.1, -1, 0.05), 10, mesh, Transform.IDENTITY, castHit);
+            sink += castHit.material();
+            narrow.cast(box, pose, Vec3.of(0.3, -1, 0.2), 10, field, Transform.IDENTITY, castHit);
+            sink += castHit.triangle();
+        });
+    }
+
     private final ContactBuffer buffer = new ContactBuffer(32);
 
     @Test
@@ -166,6 +188,11 @@ class AllocationFreeTest {
             x[0] = x[0] > 30 ? 0 : x[0] + 0.01;
             sink += query.overlap(probe, Transform.ofTranslation(Vec3.of(x[0], 1, 4)), -1, counter);
         });
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 30 ? 0 : x[0] + 0.01;
+            query.shapeCast(probe, Transform.ofTranslation(Vec3.of(x[0], 5, 4)), Vec3.of(0, -1, 0.1), 10, -1, castHit);
+            sink += castHit.distance();
+        });
     }
 
     @Test
@@ -212,6 +239,11 @@ class AllocationFreeTest {
         assertAllocationFree(() -> {
             x[0] = x[0] > 80 ? 0 : x[0] + 0.05;
             sink += query.overlap(probe, Transform.ofTranslation(Vec3.of(x[0], 0.5, 4)), -1, any);
+        });
+        assertAllocationFree(() -> {
+            x[0] = x[0] > 80 ? 0 : x[0] + 0.05;
+            query.shapeCast(probe, Transform.ofTranslation(Vec3.of(x[0], 5, 4)), Vec3.of(0.1, -1, 0), 10, -1, castHit);
+            sink += castHit.distance();
         });
     }
 
