@@ -11,8 +11,8 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /**
- * Queries against a {@link CollisionWorld} from one thread: raycasts, overlaps, and the narrow phase over ranges of
- * broad-phase pairs ({@link #collide}). Holds the working storage, so
+ * Queries against a {@link CollisionWorld} from one thread: raycasts, shape casts, overlaps, and the narrow phase over
+ * ranges of broad-phase pairs ({@link #collide}). Holds the working storage, so
  * queries allocate nothing; create one per thread with {@link CollisionWorld#newQuery()}. Queries see the world as of
  * its last {@link CollisionWorld#update()}; several threads may query concurrently while nobody changes the world.
  */
@@ -21,7 +21,9 @@ public final class CollisionQuery {
     static {
         // Inline the thin query methods into callers so the vectors and transforms they create need no allocation.
         JitInlining.include(
-            "+com/truesim/common/collision/CollisionQuery.raycast", "+com/truesim/common/collision/CollisionQuery.overlap");
+            "+com/truesim/common/collision/CollisionQuery.raycast", "+com/truesim/common/collision/CollisionQuery.overlap",
+            "+com/truesim/common/collision/CollisionQuery.shapeCast",
+            "+com/truesim/common/collision/CollisionQuery.setQueryPose");
     }
 
     private final CollisionWorld world;
@@ -58,8 +60,16 @@ public final class CollisionQuery {
     private ColliderVisitor visitor;
     private int found;
     private boolean stopped;
+    private final ShapeCastHit castHit = new ShapeCastHit();
+    private final ShapeCastHit castBest = new ShapeCastHit();
+    private final Bvh.Visitor staticCast;
+    private final Bvh.Visitor dynamicCast;
+    private double castDx;
+    private double castDy;
+    private double castDz;
+    private double castMax;
 
-    @AllowAllocation("one ray test and visitor each per query context")
+    @AllowAllocation("one ray test and visitors per query context")
     CollisionQuery(CollisionWorld world) {
         this.world = world;
         staticRay = this::staticRay;
@@ -68,6 +78,8 @@ public final class CollisionQuery {
         dynamicOverlap = this::dynamicOverlap;
         dynamicPairs = this::dynamicPair;
         staticPairs = this::staticPair;
+        staticCast = this::staticCast;
+        dynamicCast = this::dynamicCast;
     }
 
     // ---------------------------------------------------------------- raycasts
@@ -163,6 +175,12 @@ public final class CollisionQuery {
      * a bit with {@code mask}. Returns how many were visited; the visitor returns {@code false} to stop.
      */
     public int overlap(ConvexShape shape, Transform pose, int mask, ColliderVisitor visitor) {
+        setQueryPose(pose);
+        return overlapPlaced(shape, mask, visitor);
+    }
+
+    /** Unpacks the transform into queryPose. */
+    private void setQueryPose(Transform pose) {
         double[] q = queryPose;
         q[0] = pose.translation().x();
         q[1] = pose.translation().y();
@@ -174,7 +192,6 @@ public final class CollisionQuery {
         q[7] = pose.scale().x();
         q[8] = pose.scale().y();
         q[9] = pose.scale().z();
-        return overlapPlaced(shape, mask, visitor);
     }
 
     private int overlapPlaced(ConvexShape shape, int mask, ColliderVisitor visitor) {
@@ -187,6 +204,17 @@ public final class CollisionQuery {
         if (seen.length < world.capacity()) {
             growSeen(world.capacity());
         }
+        queryBounds(shape);
+        double[] b = queryBounds;
+        world.staticTree.queryAabb(b[0], b[1], b[2], b[3], b[4], b[5], staticOverlap);
+        if (!stopped) {
+            world.dynamicTree.queryAabb(b[0], b[1], b[2], b[3], b[4], b[5], dynamicOverlap);
+        }
+        return found;
+    }
+
+    /** World bounds of the query shape at queryPose, written to queryBounds. */
+    private void queryBounds(ConvexShape shape) {
         // Local bounds from the support function: exact, and no allocation.
         double margin = shape.margin();
         shape.coreSupport(-1, 0, 0, support, 0);
@@ -202,12 +230,6 @@ public final class CollisionQuery {
         shape.coreSupport(0, 0, 1, support, 0);
         queryLocal[5] = support[2] + margin;
         CollisionWorld.worldBounds(queryLocal, 0, queryPose, 0, queryBounds);
-        double[] b = queryBounds;
-        world.staticTree.queryAabb(b[0], b[1], b[2], b[3], b[4], b[5], staticOverlap);
-        if (!stopped) {
-            world.dynamicTree.queryAabb(b[0], b[1], b[2], b[3], b[4], b[5], dynamicOverlap);
-        }
-        return found;
     }
 
     private boolean staticOverlap(int slot) {
@@ -254,6 +276,89 @@ public final class CollisionQuery {
         found++;
         stopped = !visitor.visit(collider);
         return !stopped;
+    }
+
+    // ---------------------------------------------------------------- shape casts
+
+    /**
+     * The first collider hit by the convex shape moving without turning from {@code pose} along
+     * {@code t * direction}, {@code 0 <= t <= maxDistance} (finite), among those whose group shares a bit with
+     * {@code mask}: time of impact, normal and touching points as for {@link NarrowPhase#cast}, and the collider
+     * ({@link ShapeCastHit#collider()}). When several colliders are hit at the same time, the first found wins.
+     * Candidates are the colliders whose bounds overlap the swept bounds, so long casts cost more than short ones.
+     */
+    public boolean shapeCast(ConvexShape shape, Transform pose, Vec3 direction, double maxDistance, int mask,
+        ShapeCastHit hit) {
+        setQueryPose(pose);
+        return shapeCastPlaced(shape, direction.x(), direction.y(), direction.z(), maxDistance, mask, hit);
+    }
+
+    private boolean shapeCastPlaced(ConvexShape shape, double dx, double dy, double dz, double maxDistance, int mask,
+        ShapeCastHit hit) {
+        NarrowPhase.checkCastDistance(maxDistance);
+        this.mask = mask;
+        queryShape = shape;
+        castDx = dx;
+        castDy = dy;
+        castDz = dz;
+        castMax = maxDistance;
+        castBest.distance = Double.POSITIVE_INFINITY;
+        castBest.collider = ShapeCastHit.NONE;
+        // Swept bounds: the shape's bounds at the start, stretched to the end of the motion.
+        queryBounds(shape);
+        double[] b = queryBounds;
+        double ex = dx * maxDistance;
+        double ey = dy * maxDistance;
+        double ez = dz * maxDistance;
+        double minX = b[0] + Math.min(0, ex);
+        double minY = b[1] + Math.min(0, ey);
+        double minZ = b[2] + Math.min(0, ez);
+        double maxX = b[3] + Math.max(0, ex);
+        double maxY = b[4] + Math.max(0, ey);
+        double maxZ = b[5] + Math.max(0, ez);
+        world.staticTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, staticCast);
+        world.dynamicTree.queryAabb(minX, minY, minZ, maxX, maxY, maxZ, dynamicCast);
+        hit.copyFrom(castBest);
+        return castBest.collider != ShapeCastHit.NONE;
+    }
+
+    private boolean staticCast(int slot) {
+        int collider = world.staticColliders[slot];
+        int t = world.staticTriangles[slot];
+        if (t < 0) {
+            return castCandidate(collider);
+        }
+        if (world.isLive(collider) && (world.groups[collider] & mask) != 0
+            && narrow.castTrianglePlaced(queryShape, queryPose, 0, castDx, castDy, castDz, castLimit(),
+                (ConcaveShape) world.shapes[collider], t, world.poses, CollisionWorld.POSE * collider, castHit)) {
+            offerCast(collider);
+        }
+        return true;
+    }
+
+    private boolean dynamicCast(int slot) {
+        return castCandidate(world.dynamicColliders[slot]);
+    }
+
+    private boolean castCandidate(int collider) {
+        if (world.isLive(collider) && (world.groups[collider] & mask) != 0
+            && narrow.castPlaced(queryShape, queryPose, 0, castDx, castDy, castDz, castLimit(), world.shapes[collider],
+                world.poses, CollisionWorld.POSE * collider, castHit)) {
+            offerCast(collider);
+        }
+        return true;
+    }
+
+    private double castLimit() {
+        return Math.min(castMax, castBest.distance);
+    }
+
+    /** Keeps the candidate hit when it is strictly earlier than the best so far, so ties keep the first found. */
+    private void offerCast(int collider) {
+        if (castHit.distance < castBest.distance) {
+            castBest.copyFrom(castHit);
+            castBest.collider = collider;
+        }
     }
 
     // ---------------------------------------------------------------- broad phase

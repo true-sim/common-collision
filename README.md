@@ -4,8 +4,8 @@ Deterministic, allocation-free collision detection for true-sim, built on
 [common-math](https://github.com/true-sim/common-math). Package `com.truesim.common.collision`.
 
 Status: narrow phase between convex shapes, triangle meshes and heightfields with contacts,
-raycasts, and a collision world (milestone 3): broad phase, narrow phase over pair ranges and
-optional static mesh baking. Planned next: shape casts (milestone 4).
+raycasts, shape casts, and a collision world: broad phase, narrow phase over pair ranges and
+optional static mesh baking.
 
 ## Usage
 
@@ -60,6 +60,27 @@ Works for every shape and any transform, including scale. Spheres, capsules and 
 intersected exactly in local space, convex hulls by conservative advancement, meshes through their
 BVH and heightfields by walking the cells under the ray. A ray starting inside a convex shape hits
 at distance 0; triangles are hit from both sides, with the normal facing the ray.
+
+## Shape casts
+
+```java
+ShapeCastHit hit = new ShapeCastHit();
+if (narrow.cast(capsule, start, Vec3.FORWARD, 2.0, track, trackPose, hit)) {
+    // The capsule touches the track after moving by hit.distance() along the direction.
+    slide(hit.distance(), hit.normal(), hit.point(), hit.material());
+}
+query.shapeCast(capsule, start, Vec3.FORWARD, 2.0, mask, hit); // against a world: hit.collider()
+```
+
+A convex shape is swept, without turning, along a straight line against any shape or a whole world:
+the first time of impact, the target's normal facing the shape, and the touching points on both.
+Casts use conservative advancement on the narrow phase's distance query, which never passes the
+first touch: they stop within 1e-6 of the target, never inside it. A shape that starts touching or
+overlapping the target hits at distance 0 when it moves into it (with the normal that separates
+them fastest), and not at all when it slides along or leaves it, so a shape resting on the ground
+can be cast sideways. Against
+meshes and heightfields the nearest triangle wins, and seams report the face normal as for contacts.
+World casts check the colliders whose bounds overlap the swept bounds, so long casts cost more.
 
 ## Collision world
 

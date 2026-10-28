@@ -8,7 +8,8 @@ import com.truesim.common.math.spatial.Bvh;
 import java.util.List;
 
 /**
- * Narrow-phase queries between two convex shapes: overlap, signed distance, closest points and penetration.
+ * Narrow-phase queries between two convex shapes: overlap, signed distance, closest points and penetration; contacts
+ * against meshes and heightfields; and shape casts, which sweep a convex shape against any shape.
  *
  * <p>GJK finds the distance between the shapes' cores (points, segments, boxes, hulls); round shapes add their
  * margin on top, which is exact. When the cores overlap, EPA finds the core penetration and the margins are added
@@ -30,7 +31,8 @@ public final class NarrowPhase {
         // transforms callers create for a query need no allocation.
         JitInlining.include(
             "+com/truesim/common/collision/NarrowPhase.query", "+com/truesim/common/collision/NarrowPhase.overlaps",
-            "+com/truesim/common/collision/NarrowPhase.contacts", "+com/truesim/common/collision/Pose.set");
+            "+com/truesim/common/collision/NarrowPhase.contacts", "+com/truesim/common/collision/NarrowPhase.cast",
+            "+com/truesim/common/collision/Pose.set");
     }
 
     private static final ConvexHullShape POINT = ConvexHullShape.of(List.of(Vec3.ZERO));
@@ -87,7 +89,7 @@ public final class NarrowPhase {
     }
 
     /** With explicit safety limits, e.g. to test what happens when they are reached. */
-    @AllowAllocation("one triangle visitor per narrow phase")
+    @AllowAllocation("one triangle visitor each for contacts and casts per narrow phase")
     NarrowPhase(int maxIterations, int maxVertices, int maxFaces) {
         this.maxIterations = maxIterations;
         this.maxVertices = maxVertices;
@@ -101,6 +103,7 @@ public final class NarrowPhase {
         faceAlive = new boolean[maxFaces];
         edges = new int[2 * 3 * maxFaces];
         triangleVisitor = this::collideTriangle;
+        castVisitor = this::castTriangle;
     }
 
     // ---------------------------------------------------------------- queries
@@ -245,9 +248,19 @@ public final class NarrowPhase {
 
     private int contactsPlaced(ConcaveShape shape, double tx, double ty, double tz, double qx, double qy, double qz,
         double qw, double sx, double sy, double sz, double distance, ContactBuffer out) {
-        concave = shape;
+        placeConcave(shape, tx, ty, tz, qx, qy, qz, qw, sx, sy, sz);
         target = out;
         maxDistance = distance;
+        out.clear();
+        // World bounds of the convex shape from its support points, grown by the contact distance.
+        boundsA(Math.max(0, distance));
+        queryTriangles(bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5], triangleVisitor);
+        return out.size();
+    }
+
+    private void placeConcave(ConcaveShape shape, double tx, double ty, double tz, double qx, double qy, double qz,
+        double qw, double sx, double sy, double sz) {
+        concave = shape;
         ctx = tx;
         cty = ty;
         ctz = tz;
@@ -258,21 +271,28 @@ public final class NarrowPhase {
         csx = sx;
         csy = sy;
         csz = sz;
-        out.clear();
-        // World bounds of the convex shape from its support points, grown by the contact distance.
-        double grow = poseA.margin + Math.max(0, distance);
-        poseA.coreSupport(1, 0, 0, support, 0);
-        double maxX = support[0] + grow;
-        poseA.coreSupport(0, 1, 0, support, 0);
-        double maxY = support[1] + grow;
-        poseA.coreSupport(0, 0, 1, support, 0);
-        double maxZ = support[2] + grow;
+    }
+
+    /** World bounds of the convex shape (A) from its support points, grown by {@code grow}, written to bounds. */
+    private void boundsA(double grow) {
+        double g = poseA.margin + grow;
         poseA.coreSupport(-1, 0, 0, support, 0);
-        double minX = support[0] - grow;
+        bounds[0] = support[0] - g;
         poseA.coreSupport(0, -1, 0, support, 0);
-        double minY = support[1] - grow;
+        bounds[1] = support[1] - g;
         poseA.coreSupport(0, 0, -1, support, 0);
-        double minZ = support[2] - grow;
+        bounds[2] = support[2] - g;
+        poseA.coreSupport(1, 0, 0, support, 0);
+        bounds[3] = support[0] + g;
+        poseA.coreSupport(0, 1, 0, support, 0);
+        bounds[4] = support[1] + g;
+        poseA.coreSupport(0, 0, 1, support, 0);
+        bounds[5] = support[2] + g;
+    }
+
+    /** Visits the concave shape's triangles near the world box, which is moved into its local space. */
+    private void queryTriangles(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
+        Bvh.Visitor visitor) {
         // Into the concave shape's local space: the bounds of the box's eight corners.
         localMinX = Double.POSITIVE_INFINITY;
         localMinY = Double.POSITIVE_INFINITY;
@@ -283,8 +303,7 @@ public final class NarrowPhase {
         for (int corner = 0; corner < 8; corner++) {
             includeLocal((corner & 1) == 0 ? minX : maxX, (corner & 2) == 0 ? minY : maxY, (corner & 4) == 0 ? minZ : maxZ);
         }
-        shape.queryAabb(localMinX, localMinY, localMinZ, localMaxX, localMaxY, localMaxZ, triangleVisitor);
-        return out.size();
+        concave.queryAabb(localMinX, localMinY, localMinZ, localMaxX, localMaxY, localMaxZ, visitor);
     }
 
     /**
@@ -337,6 +356,19 @@ public final class NarrowPhase {
     }
 
     private boolean collideTriangle(int triangle) {
+        loadTriangle(triangle);
+        solve(scratch);
+        smoothInactiveEdge(concave.activeEdges(triangle));
+        if (scratch.distance <= maxDistance) {
+            scratch.featureB = triangle;
+            scratch.materialB = concave.material(triangle);
+            target.add(scratch);
+        }
+        return true;
+    }
+
+    /** Places the concave shape's triangle in the world as B. */
+    private void loadTriangle(int triangle) {
         concave.triangle(triangle, localCorners, 0);
         double[] world = core.corners;
         for (int i = 0; i < 9; i += 3) {
@@ -351,14 +383,6 @@ public final class NarrowPhase {
             world[i + 2] = ctz + pz + cqw * wz + (cqx * wy - cqy * wx);
         }
         poseB.set(core, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
-        solve(scratch);
-        smoothInactiveEdge(concave.activeEdges(triangle));
-        if (scratch.distance <= maxDistance) {
-            scratch.featureB = triangle;
-            scratch.materialB = concave.material(triangle);
-            target.add(scratch);
-        }
-        return true;
     }
 
     /**
@@ -406,6 +430,173 @@ public final class NarrowPhase {
         scratch.normalX = fx * scale;
         scratch.normalY = fy * scale;
         scratch.normalZ = fz * scale;
+    }
+
+    // ---------------------------------------------------------------- shape casts
+
+    private static final double MISS = Double.POSITIVE_INFINITY;
+    /**
+     * Distance at which a cast shape counts as touching its target. Casts aim at half of it, so they stop just short of
+     * contact, where the distance query still gives a clean normal.
+     */
+    private static final double CAST_TOLERANCE = 1e-6;
+
+    private final double[] bounds = new double[6];
+    private final Bvh.Visitor castVisitor;
+    private ShapeCastHit castHit;
+    private double castLimit;
+    private double castX;
+    private double castY;
+    private double castZ;
+    private double castDx;
+    private double castDy;
+    private double castDz;
+    private double castSpeed;
+
+    /**
+     * Sweeps the convex shape from {@code pose} along {@code direction} against the target: whether it hits within
+     * {@code maxDistance} (finite), with the first time of impact, normal and touching points written to {@code hit}.
+     * The shape moves without turning; the hit is at parameter {@code t} of the motion {@code t * direction}, where the
+     * shape is within 1e-6 of the target but not yet inside it. A shape that starts within that distance of the target,
+     * or overlapping it, hits at 0 if the motion goes into the target, and not at all if it slides along or leaves it:
+     * a shape resting on the ground can be cast sideways. Against meshes and heightfields the nearest triangle wins,
+     * and seams between smooth or concave triangles report the face normal, as for contacts.
+     */
+    public boolean cast(ConvexShape shape, Transform pose, Vec3 direction, double maxDistance, Shape target,
+        Transform targetPose, ShapeCastHit hit) {
+        poseA.set(shape, pose);
+        return castFrom(direction.x(), direction.y(), direction.z(), maxDistance, target,
+            targetPose.translation().x(), targetPose.translation().y(), targetPose.translation().z(),
+            targetPose.rotation().x(), targetPose.rotation().y(), targetPose.rotation().z(), targetPose.rotation().w(),
+            targetPose.scale().x(), targetPose.scale().y(), targetPose.scale().z(), hit);
+    }
+
+    /** {@link #cast} with poses as ten doubles each, as in {@link #overlapsPlaced}. */
+    boolean castPlaced(ConvexShape shape, double[] a, int ia, double dx, double dy, double dz, double maxDistance,
+        Shape target, double[] b, int ib, ShapeCastHit hit) {
+        poseA.set(shape, a[ia], a[ia + 1], a[ia + 2], a[ia + 3], a[ia + 4], a[ia + 5], a[ia + 6], a[ia + 7], a[ia + 8],
+            a[ia + 9]);
+        return castFrom(dx, dy, dz, maxDistance, target, b[ib], b[ib + 1], b[ib + 2], b[ib + 3], b[ib + 4], b[ib + 5],
+            b[ib + 6], b[ib + 7], b[ib + 8], b[ib + 9], hit);
+    }
+
+    /**
+     * {@link #castPlaced} against one triangle of a mesh or heightfield: the same result that triangle gives in a cast
+     * against the whole shape. Used for triangles baked into a {@link CollisionWorld}'s static tree.
+     */
+    boolean castTrianglePlaced(ConvexShape shape, double[] a, int ia, double dx, double dy, double dz,
+        double maxDistance, ConcaveShape target, int triangle, double[] b, int ib, ShapeCastHit hit) {
+        poseA.set(shape, a[ia], a[ia + 1], a[ia + 2], a[ia + 3], a[ia + 4], a[ia + 5], a[ia + 6], a[ia + 7], a[ia + 8],
+            a[ia + 9]);
+        startCast(dx, dy, dz, maxDistance, hit);
+        placeConcave(target, b[ib], b[ib + 1], b[ib + 2], b[ib + 3], b[ib + 4], b[ib + 5], b[ib + 6], b[ib + 7],
+            b[ib + 8], b[ib + 9]);
+        castTriangle(triangle);
+        return hit.isHit();
+    }
+
+    /** Throws unless {@code maxDistance} is finite and not negative. */
+    static void checkCastDistance(double maxDistance) {
+        if (!(maxDistance >= 0 && maxDistance < Double.POSITIVE_INFINITY)) {
+            throw new IllegalArgumentException("Cast distance must be finite and not negative: " + maxDistance);
+        }
+    }
+
+    // Kept apart from the thin public method so it inlines into the caller and its transforms need no allocation.
+    private boolean castFrom(double dx, double dy, double dz, double maxDistance, Shape target, double tx, double ty,
+        double tz, double qx, double qy, double qz, double qw, double sx, double sy, double sz, ShapeCastHit hit) {
+        startCast(dx, dy, dz, maxDistance, hit);
+        if (target instanceof ConvexShape convex) {
+            poseB.set(convex, tx, ty, tz, qx, qy, qz, qw, sx, sy, sz);
+            double t = sweep(maxDistance);
+            if (t != MISS) {
+                record(t, ShapeCastHit.NONE, ShapeCastHit.NONE);
+            }
+            return hit.isHit();
+        }
+        placeConcave((ConcaveShape) target, tx, ty, tz, qx, qy, qz, qw, sx, sy, sz);
+        // Triangles near the swept bounds: the shape's bounds at the start, stretched to the end of the motion.
+        boundsA(0);
+        double ex = dx * maxDistance;
+        double ey = dy * maxDistance;
+        double ez = dz * maxDistance;
+        queryTriangles(bounds[0] + Math.min(0, ex), bounds[1] + Math.min(0, ey), bounds[2] + Math.min(0, ez),
+            bounds[3] + Math.max(0, ex), bounds[4] + Math.max(0, ey), bounds[5] + Math.max(0, ez), castVisitor);
+        return hit.isHit();
+    }
+
+    private void startCast(double dx, double dy, double dz, double maxDistance, ShapeCastHit hit) {
+        checkCastDistance(maxDistance);
+        castHit = hit;
+        castLimit = maxDistance;
+        castX = poseA.centerX;
+        castY = poseA.centerY;
+        castZ = poseA.centerZ;
+        castDx = dx;
+        castDy = dy;
+        castDz = dz;
+        castSpeed = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        hit.distance = MISS;
+        hit.triangle = ShapeCastHit.NONE;
+        hit.material = ShapeCastHit.NONE;
+        hit.collider = ShapeCastHit.NONE;
+    }
+
+    /** Sweeps against one triangle; keeps it when it is hit strictly before the best so far, so ties keep the first. */
+    private boolean castTriangle(int triangle) {
+        loadTriangle(triangle);
+        poseA.moveTo(castX, castY, castZ);
+        double t = sweep(Math.min(castLimit, castHit.distance));
+        if (t < castHit.distance) {
+            smoothInactiveEdge(concave.activeEdges(triangle));
+            record(t, triangle, concave.material(triangle));
+        }
+        return true;
+    }
+
+    /**
+     * Conservative advancement of A along the cast direction from its start: each step moves A by its distance to B,
+     * less half the tolerance, divided by how fast the motion closes it. That is Newton's method on the distance, which
+     * is convex along a straight motion, so it never passes the first touch. Returns the time of impact, with the
+     * contact there in the scratch contact, or MISS when A moves away from B, passes {@code limit} or the steps run
+     * out.
+     */
+    private double sweep(double limit) {
+        double t = 0;
+        for (int step = 0; step < maxIterations; step++) {
+            double distance = solve(scratch);
+            double approach = scratch.normalX * castDx + scratch.normalY * castDy + scratch.normalZ * castDz;
+            if (distance <= CAST_TOLERANCE) {
+                // Starting in contact is a hit only when moving into the target, by more than rounding.
+                return step > 0 || approach > CAST_TOLERANCE * castSpeed ? t : MISS;
+            }
+            if (approach <= 0) {
+                return MISS; // moving apart: along a straight motion the distance never shrinks again
+            }
+            t += (distance - CAST_TOLERANCE / 2) / approach;
+            if (t > limit) {
+                return MISS;
+            }
+            poseA.moveTo(castX + t * castDx, castY + t * castDy, castZ + t * castDz);
+        }
+        return MISS;
+    }
+
+    /** Writes the scratch contact at time of impact t to the cast hit: B's normal facing A, and both points. */
+    private void record(double t, int triangle, int material) {
+        ShapeCastHit hit = castHit;
+        hit.distance = t;
+        hit.normalX = -scratch.normalX;
+        hit.normalY = -scratch.normalY;
+        hit.normalZ = -scratch.normalZ;
+        hit.pointX = scratch.bx;
+        hit.pointY = scratch.by;
+        hit.pointZ = scratch.bz;
+        hit.shapePointX = scratch.ax;
+        hit.shapePointY = scratch.ay;
+        hit.shapePointZ = scratch.az;
+        hit.triangle = triangle;
+        hit.material = material;
     }
 
     // ---------------------------------------------------------------- GJK
