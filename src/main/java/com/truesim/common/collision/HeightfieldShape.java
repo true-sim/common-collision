@@ -19,10 +19,14 @@ import java.util.Arrays;
  *   <li>triangle {@code 2 * cell + 1}: samples {@code (x + 1, z)}, {@code (x, z + 1)}, {@code (x + 1, z + 1)}
  * </ul>
  *
- * <p>The grid itself is the spatial index: queries look only at the cells under the query region. Immutable; queries
- * are read-only and thread-safe.
+ * <p>The grid itself is the spatial index: queries look only at the cells under the query region. On top of it, the
+ * minimum and maximum height of each block of {@value #BLOCK} x {@value #BLOCK} cells let long raycasts skip whole
+ * blocks they pass above or below. Immutable; queries are read-only and thread-safe.
  */
 public final class HeightfieldShape implements ConcaveShape {
+
+    /** Cells per side of a block with stored height bounds; blocks on the far edges may be smaller. */
+    static final int BLOCK = 16;
 
     private final int samplesX;
     private final int samplesZ;
@@ -31,6 +35,10 @@ public final class HeightfieldShape implements ConcaveShape {
     private final double[] heights;
     private final int[] materials;
     private final Aabb bounds;
+    private final int blocksX;
+    private final int blocksZ;
+    private final double[] blockMin;
+    private final double[] blockMax;
 
     private HeightfieldShape(
         int samplesX, int samplesZ, double cellSizeX, double cellSizeZ, double[] heights, int[] materials) {
@@ -47,6 +55,29 @@ public final class HeightfieldShape implements ConcaveShape {
             max = Math.max(max, h);
         }
         this.bounds = new Aabb(Vec3.of(0, min, 0), Vec3.of((samplesX - 1) * cellSizeX, max, (samplesZ - 1) * cellSizeZ));
+        this.blocksX = (samplesX - 2) / BLOCK + 1;
+        this.blocksZ = (samplesZ - 2) / BLOCK + 1;
+        this.blockMin = new double[blocksX * blocksZ];
+        this.blockMax = new double[blocksX * blocksZ];
+        Arrays.fill(blockMin, Double.POSITIVE_INFINITY);
+        Arrays.fill(blockMax, Double.NEGATIVE_INFINITY);
+        // A sample on a block edge belongs to the cells on both sides, so it counts for every block touching it.
+        for (int z = 0; z < samplesZ; z++) {
+            int bz0 = Math.max(0, (z - 1) / BLOCK);
+            int bz1 = Math.min(blocksZ - 1, z / BLOCK);
+            for (int x = 0; x < samplesX; x++) {
+                double h = heights[z * samplesX + x];
+                int bx0 = Math.max(0, (x - 1) / BLOCK);
+                int bx1 = Math.min(blocksX - 1, x / BLOCK);
+                for (int bz = bz0; bz <= bz1; bz++) {
+                    for (int bx = bx0; bx <= bx1; bx++) {
+                        int block = bz * blocksX + bx;
+                        blockMin[block] = Math.min(blockMin[block], h);
+                        blockMax[block] = Math.max(blockMax[block], h);
+                    }
+                }
+            }
+        }
     }
 
     /** A heightfield with material id 0 in every cell. */
@@ -104,6 +135,25 @@ public final class HeightfieldShape implements ConcaveShape {
 
     public double height(int x, int z) {
         return heights[z * samplesX + x];
+    }
+
+    /** Number of blocks along X: cells {@code [bx * BLOCK, (bx + 1) * BLOCK)} form block column {@code bx}. */
+    int blocksX() {
+        return blocksX;
+    }
+
+    int blocksZ() {
+        return blocksZ;
+    }
+
+    /** Lowest height of the samples of block {@code (bx, bz)}'s cells. */
+    double blockMin(int bx, int bz) {
+        return blockMin[bz * blocksX + bx];
+    }
+
+    /** Highest height of the samples of block {@code (bx, bz)}'s cells. */
+    double blockMax(int bx, int bz) {
+        return blockMax[bz * blocksX + bx];
     }
 
     /** Material id of cell {@code (x, z)}. */
