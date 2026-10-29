@@ -2,6 +2,7 @@ package com.truesim.common.collision;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
@@ -69,9 +70,12 @@ class CollisionWorldTest {
     private Set<String> bruteForcePairs() {
         Set<String> set = new TreeSet<>();
         List<Integer> ids = new ArrayList<>();
-        for (int id = 0; id < 200; id++) {
-            if (world.contains(id)) {
-                ids.add(id);
+        for (int slot = 0; slot < 200; slot++) {
+            for (int generation = 0; generation < 4; generation++) { // ids carry their slot's generation
+                int id = slot | generation << 24;
+                if (world.contains(id)) {
+                    ids.add(id);
+                }
             }
         }
         for (int a : ids) {
@@ -118,7 +122,13 @@ class CollisionWorldTest {
             world.remove(dynamics.get(20 + i));
         }
         int reused = world.addDynamic(new SphereShape(3), Transform.ofTranslation(Vec3.of(0, 1, 0)));
-        assertThat(reused).isEqualTo(dynamics.get(24)); // the last freed id comes back first
+        // The last freed slot comes back first, under a new id: the old one names nothing.
+        assertThat(reused & 0xffffff).isEqualTo(dynamics.get(24));
+        assertThat(reused).isNotEqualTo(dynamics.get(24));
+        assertThat(world.contains(dynamics.get(24))).isFalse();
+        int stale = dynamics.get(24);
+        assertThatIllegalArgumentException().isThrownBy(() -> world.shape(stale))
+            .withMessageEndingWith("(removed: its slot holds a newer one)");
         world.update();
         PairBuffer pairs = new PairBuffer();
         world.findPairs(pairs);
@@ -290,6 +300,23 @@ class CollisionWorldTest {
         RaycastHit hit = new RaycastHit();
         assertThat(world.newQuery().raycast(Vec3.of(-5, 10, 0), Vec3.of(0, -1, 0), 100, -1, hit)).isTrue();
         assertThat(hit.collider()).isEqualTo(b);
+        world.syncPoses(bodies); // nothing moved: the static tree stays as it is
+        world.update();
+        assertThat(world.newQuery().raycast(Vec3.of(-5, 10, 0), Vec3.of(0, -1, 0), 100, -1, hit)).isTrue();
+        assertThat(hit.collider()).isEqualTo(b);
+        // Poses must be finite and scale every axis.
+        Transform nan = Transform.ofTranslation(Vec3.of(Double.NaN, 0, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.addDynamic(new SphereShape(1), nan));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.setPose(a, nan));
+        Transform flat = Transform.of(Vec3.ZERO, Quat.IDENTITY, Vec3.of(1, 0, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.setPose(a, flat));
+        Transform infinite = Transform.of(Vec3.ZERO, Quat.IDENTITY, Vec3.of(1, Double.POSITIVE_INFINITY, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.setPose(a, infinite));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.setPose(a, Transform.of(Vec3.ZERO, Quat.IDENTITY,
+            Vec3.of(0, 1, 1))));
+        assertThatIllegalArgumentException().isThrownBy(() -> world.setPose(a, Transform.of(Vec3.ZERO, Quat.IDENTITY,
+            Vec3.of(1, 1, 0))));
+        assertThat(world.size()).isEqualTo(3);
         world.setPoseSource(a, 3);
         assertThatThrownBy(() -> world.syncPoses(bodies)).isInstanceOf(IndexOutOfBoundsException.class);
     }
@@ -354,13 +381,19 @@ class CollisionWorldTest {
         assertThat(world.contains(id)).isFalse();
         assertThat(world.size()).isZero();
         assertThatIllegalArgumentException().isThrownBy(() -> world.shape(id)).withMessage("No collider 0");
+        assertThatIllegalArgumentException().isThrownBy(() -> world.shape(-1)).withMessage("No collider -1");
+        assertThatIllegalArgumentException().isThrownBy(() -> world.shape(5000)).withMessage("No collider 5000");
         assertThatIllegalArgumentException().isThrownBy(() -> world.remove(id));
         // Growing past the initial capacity.
         for (int i = 0; i < 40; i++) {
             assertThat(world.addStatic(new SphereShape(1), Transform.ofTranslation(Vec3.of(3 * i, 0, 0)))).isEqualTo(
-                i == 0 ? 0 : i);
+                i == 0 ? 1 << 24 : i); // slot 0 again, its second generation
         }
         assertThat(world.size()).isEqualTo(40);
+        // No more than an id has index bits for (fewer here).
+        world.maxColliders = 40;
+        assertThatIllegalStateException().isThrownBy(() -> world.addDynamic(new SphereShape(1), Transform.IDENTITY))
+            .withMessage("At most 40 colliders");
     }
 
     @Test
