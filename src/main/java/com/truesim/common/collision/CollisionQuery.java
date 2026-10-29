@@ -144,7 +144,7 @@ public final class CollisionQuery {
         best.normalZ = nz * scale;
         best.triangle = t;
         best.material = ((ConcaveShape) world.shapes[collider]).material(t);
-        best.collider = collider;
+        best.collider = world.id(collider);
         return distance;
     }
 
@@ -164,7 +164,7 @@ public final class CollisionQuery {
         }
         // The trees pass the best distance so far as the limit, so a hit is always the new best.
         best.copyFrom(candidate);
-        best.collider = collider;
+        best.collider = world.id(collider);
         return candidate.distance;
     }
 
@@ -248,7 +248,7 @@ public final class CollisionQuery {
         }
         seen[collider] = stamp;
         found++;
-        stopped = !visitor.visit(collider);
+        stopped = !visitor.visit(world.id(collider));
         return !stopped;
     }
 
@@ -274,7 +274,7 @@ public final class CollisionQuery {
             return true;
         }
         found++;
-        stopped = !visitor.visit(collider);
+        stopped = !visitor.visit(world.id(collider));
         return !stopped;
     }
 
@@ -357,7 +357,7 @@ public final class CollisionQuery {
     private void offerCast(int collider) {
         if (castHit.distance < castBest.distance) {
             castBest.copyFrom(castHit);
-            castBest.collider = collider;
+            castBest.collider = world.id(collider);
         }
     }
 
@@ -411,7 +411,7 @@ public final class CollisionQuery {
 
     private void pair(int other) {
         if (world.canCollide(pairCollider, other)) {
-            pairTarget.add(pairCollider, other);
+            pairTarget.add(world.id(pairCollider), world.id(other));
         }
     }
 
@@ -438,8 +438,10 @@ public final class CollisionQuery {
         pairContacts = new ContactBuffer(capacity);
     }
 
-    private void collidePair(int pair, int a, int b, double maxDistance, ContactManifolds out) {
-        if (!world.isLive(a) || !world.isLive(b)) {
+    private void collidePair(int pair, int firstId, int secondId, double maxDistance, ContactManifolds out) {
+        int a = world.indexOf(firstId);
+        int b = world.indexOf(secondId);
+        if (a < 0 || b < 0) {
             out.setCount(pair, 0); // removed since the pairs were found
             return;
         }

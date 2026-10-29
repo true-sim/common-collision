@@ -29,8 +29,9 @@ import java.util.Objects;
  * }</pre>
  *
  * <p>Each collider has a material id and user data (free for the owner, e.g. a body index), and a collision filter:
- * two colliders can collide when each one's group shares a bit with the other's mask. Ids of removed colliders are
- * reused. Changing the world is not thread-safe; after {@link #update()}, any number of threads can query it through
+ * two colliders can collide when each one's group shares a bit with the other's mask. An id carries a generation:
+ * once its collider is removed it names nothing, even after a new collider takes its slot (until the slot was reused
+ * 128 times), so a stale id is caught instead of naming another collider. Changing the world is not thread-safe; after {@link #update()}, any number of threads can query it through
  * their own {@link CollisionQuery}.
  */
 public final class CollisionWorld {
@@ -41,6 +42,10 @@ public final class CollisionWorld {
     private static final int STATIC = 2;
     private static final int CONCAVE = 4;
     private static final int BAKED = 8;
+    /** Bits of an id holding the collider's index; the bits above hold the generation of its slot. */
+    static final int INDEX_BITS = 24;
+    private static final int INDEX = (1 << INDEX_BITS) - 1;
+    private static final int GENERATIONS = 1 << (31 - INDEX_BITS);
 
     Shape[] shapes = new Shape[0];
     double[] poses = new double[0];
@@ -51,6 +56,8 @@ public final class CollisionWorld {
     private int[] materials = new int[0];
     private int[] userData = new int[0];
     private int[] sources = new int[0];
+    private int[] generations = new int[0]; // per slot, bumped as its collider goes
+    int maxColliders = INDEX + 1; // as many as an id has index bits for; fewer in tests
     private int[] free = new int[0];
     private int freeCount;
     private int highWater;
@@ -101,10 +108,14 @@ public final class CollisionWorld {
 
     @AllowAllocation("adding colliders")
     private int add(Shape shape, Transform pose, boolean isStatic, boolean bake) {
+        checkPose(pose);
         int id;
         if (freeCount > 0) {
             id = free[--freeCount];
         } else {
+            if (highWater == maxColliders) {
+                throw new IllegalStateException("At most " + maxColliders + " colliders");
+            }
             id = highWater++;
             if (id == flags.length) {
                 grow(Math.max(16, 2 * id));
@@ -126,8 +137,9 @@ public final class CollisionWorld {
         sources[id] = -1;
         count++;
         structureChanged = true;
-        setPose(id, pose);
-        return id;
+        int handle = id(id);
+        setPose(handle, pose);
+        return handle;
     }
 
     @AllowAllocation("adding colliders")
@@ -141,6 +153,7 @@ public final class CollisionWorld {
         materials = Arrays.copyOf(materials, capacity);
         userData = Arrays.copyOf(userData, capacity);
         sources = Arrays.copyOf(sources, capacity);
+        generations = Arrays.copyOf(generations, capacity);
         free = Arrays.copyOf(free, capacity);
     }
 
@@ -149,9 +162,10 @@ public final class CollisionWorld {
         return highWater;
     }
 
-    /** Removes the collider; its id may be reused by a later add. */
+    /** Removes the collider: its id names nothing from now on; its slot goes to a later add, under a new id. */
     public void remove(int collider) {
-        check(collider);
+        collider = slot(collider);
+        generations[collider] = (generations[collider] + 1) % GENERATIONS; // the old id names nothing now
         flags[collider] = 0;
         shapes[collider] = null;
         free[freeCount++] = collider;
@@ -159,8 +173,11 @@ public final class CollisionWorld {
         structureChanged = true;
     }
 
+    /** Whether {@code collider} is a live collider's id: not removed, and not an id of a slot reused since. */
     public boolean contains(int collider) {
-        return collider >= 0 && collider < highWater && (flags[collider] & USED) != 0;
+        int index = collider & INDEX;
+        return collider >= 0 && index < highWater && (flags[index] & USED) != 0
+            && generations[index] == collider >>> INDEX_BITS;
     }
 
     /** Number of colliders. */
@@ -169,31 +186,40 @@ public final class CollisionWorld {
     }
 
     public Shape shape(int collider) {
-        check(collider);
+        collider = slot(collider);
         return shapes[collider];
     }
 
     /** Whether the collider was added baked: its triangles are entries of the static tree. */
     public boolean isBaked(int collider) {
-        return (flags[collider] & BAKED) != 0;
+        return baked(slot(collider));
+    }
+
+    private boolean baked(int index) {
+        return (flags[index] & BAKED) != 0;
     }
 
     public boolean isStatic(int collider) {
-        check(collider);
+        collider = slot(collider);
         return (flags[collider] & STATIC) != 0;
     }
 
     public Transform pose(int collider) {
-        check(collider);
+        collider = slot(collider);
         int p = POSE * collider;
         return Transform.of(Vec3.of(poses[p], poses[p + 1], poses[p + 2]),
             new Quat(poses[p + 3], poses[p + 4], poses[p + 5], poses[p + 6]),
             Vec3.of(poses[p + 7], poses[p + 8], poses[p + 9]));
     }
 
-    /** Moves the collider; takes effect for queries at the next {@link #update()}. */
+    /**
+     * Moves the collider; takes effect for queries at the next {@link #update()}.
+     *
+     * @throws IllegalArgumentException if the pose is not finite, or scales to nothing on an axis
+     */
     public void setPose(int collider, Transform pose) {
-        check(collider);
+        collider = slot(collider);
+        checkPose(pose);
         int p = POSE * collider;
         poses[p] = pose.translation().x();
         poses[p + 1] = pose.translation().y();
@@ -210,58 +236,86 @@ public final class CollisionWorld {
         }
     }
 
+    private static void checkPose(Transform pose) {
+        Vec3 t = pose.translation();
+        Quat r = pose.rotation();
+        Vec3 s = pose.scale();
+        if (!Double.isFinite(t.x() + t.y() + t.z() + r.x() + r.y() + r.z() + r.w())
+            || !Double.isFinite(s.x() + s.y() + s.z()) || s.x() == 0 || s.y() == 0 || s.z() == 0) {
+            throw new IllegalArgumentException("Not a finite pose with a scale on every axis: " + pose);
+        }
+    }
+
     /**
      * Makes {@link #syncPoses} copy this collider's pose from index {@code index} of the source array; -1 stops it.
      */
     public void setPoseSource(int collider, int index) {
-        check(collider);
+        collider = slot(collider);
         sources[collider] = Math.max(-1, index);
     }
 
     public int poseSource(int collider) {
-        check(collider);
+        collider = slot(collider);
         return sources[collider];
     }
 
-    /** Copies the pose of every collider with a pose source from {@code source}, e.g. the simulation's bodies. */
+    /**
+     * Copies the pose of every collider with a pose source from {@code source}, e.g. the simulation's bodies. Static
+     * colliders whose pose did not change leave the static tree as it is.
+     */
     public void syncPoses(TransformArray source) {
+        MemorySegment from = source.segment();
         for (int collider = 0; collider < highWater; collider++) {
             if ((flags[collider] & USED) != 0 && sources[collider] >= 0) {
                 // A TransformArray stores the same ten doubles in the same order as the world's poses.
-                MemorySegment.copy(source.segment(), ValueLayout.JAVA_DOUBLE_UNALIGNED,
-                    Objects.checkIndex(sources[collider], source.size()) * source.stride(), poses, POSE * collider, POSE);
-                staticMoved |= (flags[collider] & STATIC) != 0;
+                long at = Objects.checkIndex(sources[collider], source.size()) * source.stride();
+                if ((flags[collider] & STATIC) != 0) {
+                    if (samePose(from, at, collider)) {
+                        continue; // a rebuild of the static tree for nothing
+                    }
+                    staticMoved = true;
+                }
+                MemorySegment.copy(from, ValueLayout.JAVA_DOUBLE_UNALIGNED, at, poses, POSE * collider, POSE);
             }
         }
     }
 
+    private boolean samePose(MemorySegment from, long at, int collider) {
+        for (int i = 0; i < POSE; i++) {
+            if (from.get(ValueLayout.JAVA_DOUBLE_UNALIGNED, at + 8L * i) != poses[POSE * collider + i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public int material(int collider) {
-        check(collider);
+        collider = slot(collider);
         return materials[collider];
     }
 
     public void setMaterial(int collider, int material) {
-        check(collider);
+        collider = slot(collider);
         materials[collider] = material;
     }
 
     public int userData(int collider) {
-        check(collider);
+        collider = slot(collider);
         return userData[collider];
     }
 
     public void setUserData(int collider, int data) {
-        check(collider);
+        collider = slot(collider);
         userData[collider] = data;
     }
 
     public int group(int collider) {
-        check(collider);
+        collider = slot(collider);
         return groups[collider];
     }
 
     public int mask(int collider) {
-        check(collider);
+        collider = slot(collider);
         return masks[collider];
     }
 
@@ -271,15 +325,28 @@ public final class CollisionWorld {
      * the group is 1 and the mask is all bits.
      */
     public void setFilter(int collider, int group, int mask) {
-        check(collider);
+        collider = slot(collider);
         groups[collider] = group;
         masks[collider] = mask;
     }
 
-    private void check(int collider) {
-        if (!contains(collider)) {
-            throw new IllegalArgumentException("No collider " + collider);
+    /** The index of collider {@code id}: where its data is kept. */
+    private int slot(int id) {
+        if (!contains(id)) {
+            throw new IllegalArgumentException("No collider " + id + (id >= 0 && (id & INDEX) < highWater
+                && (flags[id & INDEX] & USED) != 0 ? " (removed: its slot holds a newer one)" : ""));
         }
+        return id & INDEX;
+    }
+
+    /** The id of the collider at {@code index}: the index, and the slot's generation above it. */
+    int id(int index) {
+        return index | generations[index] << INDEX_BITS;
+    }
+
+    /** The index of a live collider's {@code id}, or -1 for a removed one (removed since a query found it, say). */
+    int indexOf(int id) {
+        return contains(id) ? id & INDEX : -1;
     }
 
     boolean isLive(int collider) {
@@ -353,7 +420,7 @@ public final class CollisionWorld {
         for (int collider = 0; collider < highWater; collider++) {
             if ((flags[collider] & (USED | STATIC)) == (USED | STATIC)) {
                 statics++;
-                staticEntries += isBaked(collider) ? ((ConcaveShape) shapes[collider]).triangleCount() : 1;
+                staticEntries += baked(collider) ? ((ConcaveShape) shapes[collider]).triangleCount() : 1;
             }
         }
         staticColliders = new int[staticEntries];
@@ -363,7 +430,7 @@ public final class CollisionWorld {
         int d = 0;
         for (int collider = 0; collider < highWater; collider++) {
             if ((flags[collider] & (USED | STATIC)) == (USED | STATIC)) {
-                int triangles = isBaked(collider) ? ((ConcaveShape) shapes[collider]).triangleCount() : 0;
+                int triangles = baked(collider) ? ((ConcaveShape) shapes[collider]).triangleCount() : 0;
                 for (int t = 0; t < Math.max(1, triangles); t++) {
                     staticColliders[s] = collider;
                     staticTriangles[s++] = triangles == 0 ? -1 : t;
@@ -440,7 +507,7 @@ public final class CollisionWorld {
 
     /** The collider's world bounds, computed from its current pose. */
     public Aabb bounds(int collider) {
-        check(collider);
+        collider = slot(collider);
         double[] box = new double[6];
         worldBounds(localBounds, 6 * collider, poses, POSE * collider, box);
         return new Aabb(Vec3.of(box[0], box[1], box[2]), Vec3.of(box[3], box[4], box[5]));
