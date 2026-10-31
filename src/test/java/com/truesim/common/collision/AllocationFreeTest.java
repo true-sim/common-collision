@@ -111,6 +111,11 @@ class AllocationFreeTest {
             sink += rayHit.material();
             caster.cast(field, Transform.IDENTITY, Vec3.of(x[0] + 1, 10, 4), Vec3.of(1, -0.3, 0.5), 100, rayHit);
             sink += rayHit.triangle();
+            // Long and level across the field's blocks, and short and down within one.
+            caster.cast(field, Transform.IDENTITY, Vec3.of(-1, 1.5, x[0] + 3), Vec3.of(1, 0, 0.3), 200, rayHit);
+            sink += rayHit.distance();
+            caster.cast(field, Transform.IDENTITY, Vec3.of(x[0] + 5, 3, 7), Vec3.of(0.1, -1, 0), 5, rayHit);
+            sink += rayHit.distance();
         });
     }
 

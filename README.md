@@ -58,8 +58,10 @@ if (caster.cast(track, trackPose, wheelCenter, Vec3.DOWN, suspensionLength, hit)
 
 Works for every shape and any transform, including scale. Spheres, capsules and boxes are
 intersected exactly in local space, convex hulls by conservative advancement, meshes through their
-BVH and heightfields by walking the cells under the ray. A ray starting inside a convex shape hits
-at distance 0; triangles are hit from both sides, with the normal facing the ray.
+BVH and heightfields by walking the cells under the ray. Heightfields keep the lowest and highest
+height of each block of 16 x 16 cells, so long rays (a camera ray across the whole map) skip the
+blocks they pass above or below in one step. A ray starting inside a convex shape hits at distance
+0; triangles are hit from both sides, with the normal facing the ray.
 
 ## Shape casts
 

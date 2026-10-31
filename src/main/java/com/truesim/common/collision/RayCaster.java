@@ -358,7 +358,10 @@ public final class RayCaster {
         return true;
     }
 
-    /** Walks the cells under the ray front to back (a 2D DDA over x and z); the first cell with a hit has the nearest. */
+    /**
+     * Walks the blocks under the ray front to back (a 2D DDA over x and z), skipping blocks the ray passes entirely
+     * above or below, and walks the cells of the others the same way; the first cell with a hit has the nearest.
+     */
     private boolean heightfield(HeightfieldShape field, double ox, double oy, double oz, double dx, double dy,
         double dz, double max) {
         double sx = field.cellSizeX();
@@ -372,17 +375,70 @@ public final class RayCaster {
         }
         double t = Math.max(0, slabEnter);
         double end = Math.min(slabExit, max);
-        if (t > end) {
-            return false;
+        if (!(t <= end)) {
+            return false; // also for a NaN maximum distance, which would never let the walk end
         }
-        int x = Math.max(0, Math.min(cellsX - 1, (int) Math.floor((ox + t * dx) / sx)));
-        int z = Math.max(0, Math.min(cellsZ - 1, (int) Math.floor((oz + t * dz) / sz)));
+        int block = HeightfieldShape.BLOCK;
+        // The blocks containing the entry and end points, from the cells the cell walk starts and ends in.
+        int bx = Math.max(0, Math.min(cellsX - 1, (int) Math.floor((ox + t * dx) / sx))) / block;
+        int bz = Math.max(0, Math.min(cellsZ - 1, (int) Math.floor((oz + t * dz) / sz))) / block;
+        if (bx == Math.max(0, Math.min(cellsX - 1, (int) Math.floor((ox + end * dx) / sx))) / block
+            && bz == Math.max(0, Math.min(cellsZ - 1, (int) Math.floor((oz + end * dz) / sz))) / block) {
+            // Short rays, such as a wheel's, stay in one block: walking its cells directly is cheaper.
+            return cells(field, 0, 0, cellsX, cellsZ, t, end, ox, oy, oz, dx, dy, dz, max);
+        }
         int stepX = dx > 0 ? 1 : -1;
         int stepZ = dz > 0 ? 1 : -1;
-        double nextX = dx == 0 ? MISS : ((x + (dx > 0 ? 1 : 0)) * sx - ox) / dx;
-        double nextZ = dz == 0 ? MISS : ((z + (dz > 0 ? 1 : 0)) * sz - oz) / dz;
-        double deltaX = sx / Math.abs(dx);
-        double deltaZ = sz / Math.abs(dz);
+        int aheadX = dx > 0 ? 1 : 0;
+        int aheadZ = dz > 0 ? 1 : 0;
+        // Edges are computed as (cell index) * size, exactly as the slab test computes the grid's edges and the cell
+        // walk its cells' edges. So a ray never steps past the grid's last block: that block's far edge is at or beyond
+        // the grid's, where the walk ends. Likewise the cell walk ends at its block's edges.
+        double nextX = dx == 0 ? MISS : ((bx + aheadX) * block * sx - ox) / dx;
+        double nextZ = dz == 0 ? MISS : ((bz + aheadZ) * block * sz - oz) / dz;
+        while (true) {
+            double exit = Math.min(end, Math.min(nextX, nextZ));
+            double y0 = oy + t * dy;
+            double y1 = oy + exit * dy;
+            // Skip blocks the ray passes entirely above or below.
+            if (Math.max(y0, y1) >= field.blockMin(bx, bz) && Math.min(y0, y1) <= field.blockMax(bx, bz)
+                && cells(field, bx * block, bz * block, Math.min(cellsX, (bx + 1) * block),
+                    Math.min(cellsZ, (bz + 1) * block), t, exit, ox, oy, oz, dx, dy, dz, max)) {
+                return true;
+            }
+            if (exit >= end) {
+                return false;
+            }
+            if (nextX < nextZ) {
+                bx += stepX;
+                t = nextX;
+                nextX = ((bx + aheadX) * block * sx - ox) / dx;
+            } else {
+                bz += stepZ;
+                t = nextZ;
+                nextZ = ((bz + aheadZ) * block * sz - oz) / dz;
+            }
+        }
+    }
+
+    /**
+     * Walks the cells under the ray between {@code t} and {@code end} front to back, starting in the cell of the
+     * entry point clamped to {@code [x0, x1) x [z0, z1)} (a block, or the whole grid); accepts the hit in the first
+     * cell with one within {@code max}. The walk ends at {@code end}, which lies at or before the far edges of the
+     * range's last cells: a block's exit, or the end of the ray within the grid.
+     */
+    private boolean cells(HeightfieldShape field, int x0, int z0, int x1, int z1, double t, double end, double ox,
+        double oy, double oz, double dx, double dy, double dz, double max) {
+        double sx = field.cellSizeX();
+        double sz = field.cellSizeZ();
+        int x = Math.max(x0, Math.min(x1 - 1, (int) Math.floor((ox + t * dx) / sx)));
+        int z = Math.max(z0, Math.min(z1 - 1, (int) Math.floor((oz + t * dz) / sz)));
+        int stepX = dx > 0 ? 1 : -1;
+        int stepZ = dz > 0 ? 1 : -1;
+        int aheadX = dx > 0 ? 1 : 0;
+        int aheadZ = dz > 0 ? 1 : 0;
+        double nextX = dx == 0 ? MISS : ((x + aheadX) * sx - ox) / dx;
+        double nextZ = dz == 0 ? MISS : ((z + aheadZ) * sz - oz) / dz;
         while (true) {
             double exit = Math.min(end, Math.min(nextX, nextZ));
             double y0 = oy + t * dy;
@@ -394,7 +450,7 @@ public final class RayCaster {
             // Skip cells the ray passes entirely above or below.
             if (Math.max(y0, y1) >= Math.min(Math.min(h00, h10), Math.min(h01, h11))
                 && Math.min(y0, y1) <= Math.max(Math.max(h00, h10), Math.max(h01, h11))) {
-                int first = 2 * (z * cellsX + x);
+                int first = 2 * (z * field.cellsX() + x);
                 double t0 = triangle(field, first, ox, oy, oz, dx, dy, dz);
                 double t1 = triangle(field, first + 1, ox, oy, oz, dx, dy, dz);
                 double hit = Math.min(t0, t1);
@@ -408,14 +464,11 @@ public final class RayCaster {
             if (nextX < nextZ) {
                 x += stepX;
                 t = nextX;
-                nextX += deltaX;
+                nextX = ((x + aheadX) * sx - ox) / dx;
             } else {
                 z += stepZ;
                 t = nextZ;
-                nextZ += deltaZ;
-            }
-            if (x < 0 || x >= cellsX || z < 0 || z >= cellsZ) {
-                return false;
+                nextZ = ((z + aheadZ) * sz - oz) / dz;
             }
         }
     }

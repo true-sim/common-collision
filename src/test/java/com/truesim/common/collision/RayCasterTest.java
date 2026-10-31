@@ -308,6 +308,51 @@ class RayCasterTest {
         assertThat(cast(flat, Transform.IDENTITY, Vec3.of(1, 5, 1), Vec3.of(0, -1, 0), 2)).isFalse();
     }
 
+    @Test
+    void heightfieldSkipsBlocksAndMatchesBruteForce() {
+        HeightfieldShape field = HeightfieldShapeTest.terraces();
+        // Under the high first block, skipping it from below, then up through the cliff in the next block.
+        assertThat(cast(field, Transform.IDENTITY, Vec3.of(-1, 2, 5), Vec3.of(1, 0, 0), 100)).isTrue();
+        assertThat(hit.point().x()).isBetween(16.0, 17.0);
+        assertMatchesBruteForce(field, Transform.IDENTITY, Vec3.of(-1, 2, 5), Vec3.of(1, 0, 0), 100);
+        // Over the low last block, skipping it from above, into the cliff up to the first block.
+        assertThat(cast(field, Transform.IDENTITY, Vec3.of(41, 3, 5), Vec3.of(-1, 0, 0), 100)).isTrue();
+        assertThat(hit.point().x()).isBetween(16.0, 17.0);
+        assertMatchesBruteForce(field, Transform.IDENTITY, Vec3.of(41, 3, 5), Vec3.of(-1, 0, 0), 100);
+        // Along -z within one column of blocks, and back along +z.
+        assertThat(cast(field, Transform.IDENTITY, Vec3.of(5, 3, 41), Vec3.of(0, 0, -1), 100)).isTrue();
+        assertThat(hit.point().z()).isBetween(16.0, 17.0);
+        assertMatchesBruteForce(field, Transform.IDENTITY, Vec3.of(5, 3, 41), Vec3.of(0, 0, -1), 100);
+        assertMatchesBruteForce(field, Transform.IDENTITY, Vec3.of(5, 3, -1), Vec3.of(0, 0, 1), 100);
+        // Ending before the cliff it would hit, and over everything.
+        assertThat(cast(field, Transform.IDENTITY, Vec3.of(41, 3, 5), Vec3.of(-1, 0, 0), 20)).isFalse();
+        assertThat(cast(field, Transform.IDENTITY, Vec3.of(-1, 6.45, 3), Vec3.of(1, 0, 0.2), 100)).isFalse();
+        // A NaN maximum distance never hits, rather than walking forever.
+        assertThat(cast(field, Transform.IDENTITY, Vec3.of(5, 10, 5), Vec3.of(0, -1, 0), Double.NaN)).isFalse();
+        Transform pose = Transform.of(Vec3.of(-3, 1, 2), Quat.fromYawPitchRoll(-0.7, 0, 0));
+        Rng rng = Rng.seeded(11);
+        int hits = 0;
+        for (int i = 0; i < 4000; i++) {
+            Vec3 local = Vec3.of(rng.nextDouble(-5, 45), rng.nextDouble(-6, 9), rng.nextDouble(-5, 40));
+            Vec3 direction = switch (i % 6) {
+                case 0 -> Vec3.of(rng.nextDouble(-1, 1), rng.nextDouble(-0.1, 0.1), rng.nextDouble(-1, 1)); // long
+                case 1 -> Vec3.of(rng.nextDouble(-1, 1), 0, rng.nextDouble(-1, 1)); // level
+                case 2 -> Vec3.of(rng.nextDouble(-1, 1), rng.nextDouble(-0.1, 0.1), 0); // along x
+                case 3 -> Vec3.of(0, rng.nextDouble(-0.1, 0.1), rng.nextDouble(-1, 1)); // along z
+                case 4 -> Vec3.of(0, -1, 0); // straight down
+                default -> rng.nextVec3OnSphere();
+            };
+            Transform placed = i % 2 == 0 ? Transform.IDENTITY : pose;
+            double max = i % 5 == 0 ? rng.nextDouble(0.5, 12) : 200;
+            Vec3 origin = placed.transformPoint(local);
+            assertMatchesBruteForce(field, placed, origin, placed.transformDirection(direction), max);
+            if (hit.isHit()) {
+                hits++;
+            }
+        }
+        assertThat(hits).isGreaterThan(1000);
+    }
+
     private void assertMatchesBruteForce(ConcaveShape shape, Transform pose, Vec3 origin, Vec3 direction, double max) {
         double best = Double.POSITIVE_INFINITY;
         int bestTriangle = -1;

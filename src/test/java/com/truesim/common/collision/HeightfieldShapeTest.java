@@ -30,6 +30,72 @@ class HeightfieldShapeTest {
         return HeightfieldShape.of(n + 1, m + 1, 2, 1.5, heights, materials);
     }
 
+    /**
+     * Terraces of 40 x 35 unit cells: 3 x 3 blocks (the last ones 8 and 3 cells wide) at different levels, with small
+     * bumps. A sample takes the level of the block left of and below it, so cliffs lie in each block's first cells.
+     *
+     * <pre>
+     * bz = 2:  -4   0   6
+     * bz = 1:   0   6  -4
+     * bz = 0:   6  -4   0
+     * </pre>
+     */
+    static HeightfieldShape terraces() {
+        int n = 40;
+        int m = 35;
+        double[] levels = {6, -4, 0, 0, 6, -4, -4, 0, 6};
+        double[] heights = new double[(n + 1) * (m + 1)];
+        int[] materials = new int[n * m];
+        for (int z = 0; z <= m; z++) {
+            for (int x = 0; x <= n; x++) {
+                int bx = Math.max(0, x - 1) / HeightfieldShape.BLOCK;
+                int bz = Math.max(0, z - 1) / HeightfieldShape.BLOCK;
+                heights[z * (n + 1) + x] = levels[bz * 3 + bx] + 0.4 * Math.sin(0.7 * x + 0.3 * z);
+                if (x < n && z < m) {
+                    materials[z * n + x] = (x + z) % 3;
+                }
+            }
+        }
+        return HeightfieldShape.of(n + 1, m + 1, 1, 1, heights, materials);
+    }
+
+    @Test
+    void blockBoundsCoverTheirCells() {
+        HeightfieldShape field = terraces();
+        assertThat(field.blocksX()).isEqualTo(3);
+        assertThat(field.blocksZ()).isEqualTo(3);
+        for (int bz = 0; bz < 3; bz++) {
+            for (int bx = 0; bx < 3; bx++) {
+                double min = Double.POSITIVE_INFINITY;
+                double max = Double.NEGATIVE_INFINITY;
+                // The samples of the block's cells, including those on its far edges.
+                for (int z = bz * 16; z <= Math.min(field.cellsZ(), (bz + 1) * 16); z++) {
+                    for (int x = bx * 16; x <= Math.min(field.cellsX(), (bx + 1) * 16); x++) {
+                        min = Math.min(min, field.height(x, z));
+                        max = Math.max(max, field.height(x, z));
+                    }
+                }
+                assertThat(field.blockMin(bx, bz)).as("block %d, %d", bx, bz).isEqualTo(min);
+                assertThat(field.blockMax(bx, bz)).as("block %d, %d", bx, bz).isEqualTo(max);
+            }
+        }
+        // The first block is level ground; the second holds the cliff down from it.
+        assertThat(field.blockMin(0, 0)).isGreaterThan(5);
+        assertThat(field.blockMin(1, 0)).isLessThan(-3);
+        assertThat(field.blockMax(1, 0)).isGreaterThan(5);
+        // Exactly one and two blocks of cells, and fewer than one.
+        assertThat(hills(16, 32).blocksX()).isEqualTo(1);
+        assertThat(hills(16, 32).blocksZ()).isEqualTo(2);
+        assertThat(hills(4, 3).blocksX()).isEqualTo(1);
+        // A spike on the edge between two blocks belongs to the cells on both sides.
+        double[] heights = new double[33 * 3];
+        heights[1 * 33 + 16] = 7;
+        HeightfieldShape spike = HeightfieldShape.of(33, 3, 1, 1, heights);
+        assertThat(spike.blockMax(0, 0)).isEqualTo(7);
+        assertThat(spike.blockMax(1, 0)).isEqualTo(7);
+        assertThat(spike.blockMin(1, 0)).isZero();
+    }
+
     @Test
     void layoutAndAccessors() {
         HeightfieldShape field = hills(4, 3);
