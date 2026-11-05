@@ -91,4 +91,54 @@ final class Pose {
         out[at + 1] = ty + py + qw * vy + (qz * vx - qx * vz);
         out[at + 2] = tz + pz + qw * vz + (qx * vy - qy * vx);
     }
+
+    /** Whether the core is smooth: a round shape under non-uniform scale, whose margin is part of the core. */
+    boolean smooth() {
+        return !uniform && shape.margin() > 0;
+    }
+
+    /**
+     * Writes the world-space point of the core's sharp part furthest in world direction d: the core support without
+     * the rounded part of a smooth core (for a scaled sphere its center, for a scaled capsule a segment end), which
+     * is {@link #coreSupport} for every other core.
+     */
+    void sharpSupport(double dx, double dy, double dz, double[] out, int at) {
+        localDirection(dx, dy, dz, local, 0);
+        shape.coreSupport(local[0], local[1], local[2], local, 0);
+        worldVector(local[0], local[1], local[2], out, at);
+        out[at] += tx;
+        out[at + 1] += ty;
+        out[at + 2] += tz;
+    }
+
+    /**
+     * The rounded part of a smooth core is K times a ball of the margin's radius, with K = rotation times scale; its
+     * support in direction d is margin * K m / |m| with m = K^T d. Writes m = scale times inverse rotation of d.
+     */
+    void localDirection(double dx, double dy, double dz, double[] out, int at) {
+        double ux = 2 * (-qy * dz + qz * dy);
+        double uy = 2 * (-qz * dx + qx * dz);
+        double uz = 2 * (-qx * dy + qy * dx);
+        out[at] = (dx + qw * ux + (-qy * uz + qz * uy)) * sx;
+        out[at + 1] = (dy + qw * uy + (-qz * ux + qx * uz)) * sy;
+        out[at + 2] = (dz + qw * uz + (-qx * uy + qy * ux)) * sz;
+    }
+
+    /** Writes K p = rotation times scale of local vector p, without the translation. */
+    void worldVector(double px, double py, double pz, double[] out, int at) {
+        px *= sx;
+        py *= sy;
+        pz *= sz;
+        double vx = 2 * (qy * pz - qz * py);
+        double vy = 2 * (qz * px - qx * pz);
+        double vz = 2 * (qx * py - qy * px);
+        out[at] = px + qw * vx + (qy * vz - qz * vy);
+        out[at + 1] = py + qw * vy + (qz * vx - qx * vz);
+        out[at + 2] = pz + qw * vz + (qx * vy - qy * vx);
+    }
+
+    /** The radius of the rounded part of a smooth core. */
+    double roundRadius() {
+        return shape.margin();
+    }
 }

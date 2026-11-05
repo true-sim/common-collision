@@ -46,6 +46,7 @@ class AllocationFreeTest {
     @Test
     void scaledRoundShapes() {
         SphereShape sphere = new SphereShape(1);
+        BoxShape box = new BoxShape(Vec3.ONE);
         Transform ellipsoid = Transform.of(Vec3.ZERO, Quat.IDENTITY, Vec3.of(3, 1, 1));
         double[] x = {0};
         Quat rb = Quat.IDENTITY;
@@ -53,6 +54,9 @@ class AllocationFreeTest {
             x[0] += 1e-9;
             Transform tb = Transform.of(Vec3.of(2 + x[0], 2, 0), rb);
             sink += narrow.query(sphere, ellipsoid, sphere, tb, contact);
+            // Smooth cores penetrating a box, and apart from it: both refined.
+            sink += narrow.query(sphere, ellipsoid, box, Transform.of(Vec3.of(2.5 + x[0], 0.5, 0), rb), contact);
+            sink += narrow.query(sphere, ellipsoid, box, Transform.of(Vec3.of(5 + x[0], 0.5, 0), rb), contact);
         });
     }
 

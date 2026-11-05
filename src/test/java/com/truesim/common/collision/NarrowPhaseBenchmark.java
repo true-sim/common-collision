@@ -111,7 +111,8 @@ class NarrowPhaseBenchmark {
                 if (overlapping) {
                     for (Pair pair : pairs) {
                         double d = narrow.query(pair.a(), pair.ta(), pair.b(), pair.tb(), contact);
-                        Transform out = pair.ta().withTranslation(pair.ta().translation().add(contact.normal().scale(d)));
+                        Vec3 moved = pair.ta().translation().add(contact.normal().scale(d));
+                        Transform out = pair.ta().withTranslation(moved);
                         worst = Math.max(worst, Math.abs(check.query(pair.a(), out, pair.b(), pair.tb(), touch)));
                     }
                 }

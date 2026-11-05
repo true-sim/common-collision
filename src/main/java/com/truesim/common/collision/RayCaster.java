@@ -454,7 +454,8 @@ public final class RayCaster {
                 double y1 = oy + exit * dy;
                 int bx = x >> level;
                 int bz = z >> level;
-                if (Math.max(y0, y1) >= field.blockMin(level, bx, bz) && Math.min(y0, y1) <= field.blockMax(level, bx, bz)) {
+                if (Math.max(y0, y1) >= field.blockMin(level, bx, bz)
+                    && Math.min(y0, y1) <= field.blockMax(level, bx, bz)) {
                     level--; // the ray may touch something in this block: look at its quarters
                     continue;
                 }
