@@ -19,8 +19,9 @@ import java.util.Arrays;
  *   <li>triangle {@code 2 * cell + 1}: samples {@code (x + 1, z)}, {@code (x, z + 1)}, {@code (x + 1, z + 1)}
  * </ul>
  *
- * <p>The grid itself is the spatial index: queries look only at the cells under the query region. Immutable; queries
- * are read-only and thread-safe.
+ * <p>The grid itself is the spatial index: queries look only at the cells under the query region. Raycasts also skip
+ * whole blocks of cells they pass above or below, by the height bounds of square blocks of 2, 4, 8 ... cells built
+ * with the heightfield ({@link #withBlockBounds(boolean)}). Immutable; queries are read-only and thread-safe.
  */
 public final class HeightfieldShape implements ConcaveShape {
 
@@ -31,15 +32,23 @@ public final class HeightfieldShape implements ConcaveShape {
     private final double[] heights;
     private final int[] materials;
     private final Aabb bounds;
+    /**
+     * Height bounds of square blocks of cells, so raycasts can skip whole blocks they pass above or below: level
+     * {@code l} (from 1) holds blocks of 2^l x 2^l cells, min and max interleaved, rounded outwards to floats. Level 0,
+     * the cells themselves, is read from the heights.
+     */
+    private final float[][] blockBounds;
+    private final boolean blocks;
 
-    private HeightfieldShape(
-        int samplesX, int samplesZ, double cellSizeX, double cellSizeZ, double[] heights, int[] materials) {
+    private HeightfieldShape(int samplesX, int samplesZ, double cellSizeX, double cellSizeZ, double[] heights,
+        int[] materials, boolean blocks) {
         this.samplesX = samplesX;
         this.samplesZ = samplesZ;
         this.cellSizeX = cellSizeX;
         this.cellSizeZ = cellSizeZ;
         this.heights = heights;
         this.materials = materials;
+        this.blocks = blocks;
         double min = Double.POSITIVE_INFINITY;
         double max = Double.NEGATIVE_INFINITY;
         for (double h : heights) {
@@ -47,6 +56,99 @@ public final class HeightfieldShape implements ConcaveShape {
             max = Math.max(max, h);
         }
         this.bounds = new Aabb(Vec3.of(0, min, 0), Vec3.of((samplesX - 1) * cellSizeX, max, (samplesZ - 1) * cellSizeZ));
+        int levels = 0;
+        while (blocks && (blocksX(levels) > 1 || blocksZ(levels) > 1)) {
+            levels++;
+        }
+        this.blockBounds = new float[levels + 1][];
+        for (int level = 1; level <= levels; level++) {
+            buildLevel(level);
+        }
+    }
+
+    /** One level of block bounds, from the samples (level 1) or from the level below. */
+    private void buildLevel(int level) {
+        int blocksX = blocksX(level);
+        int blocksZ = blocksZ(level);
+        float[] bounds = new float[2 * blocksX * blocksZ];
+        for (int bz = 0; bz < blocksZ; bz++) {
+            for (int bx = 0; bx < blocksX; bx++) {
+                double min = Double.POSITIVE_INFINITY;
+                double max = Double.NEGATIVE_INFINITY;
+                if (level == 1) {
+                    // The samples at the corners of the block's (up to) 2 x 2 cells.
+                    for (int z = 2 * bz; z <= Math.min(2 * bz + 2, samplesZ - 1); z++) {
+                        for (int x = 2 * bx; x <= Math.min(2 * bx + 2, samplesX - 1); x++) {
+                            min = Math.min(min, heights[z * samplesX + x]);
+                            max = Math.max(max, heights[z * samplesX + x]);
+                        }
+                    }
+                } else {
+                    // The (up to) 2 x 2 blocks of the level below.
+                    for (int z = 2 * bz; z <= Math.min(2 * bz + 1, blocksZ(level - 1) - 1); z++) {
+                        for (int x = 2 * bx; x <= Math.min(2 * bx + 1, blocksX(level - 1) - 1); x++) {
+                            min = Math.min(min, blockMin(level - 1, x, z));
+                            max = Math.max(max, blockMax(level - 1, x, z));
+                        }
+                    }
+                }
+                bounds[2 * (bz * blocksX + bx)] = roundDown(min);
+                bounds[2 * (bz * blocksX + bx) + 1] = roundUp(max);
+            }
+        }
+        blockBounds[level] = bounds;
+    }
+
+    private static float roundDown(double value) {
+        float rounded = (float) value;
+        return rounded > value ? Math.nextDown(rounded) : rounded;
+    }
+
+    private static float roundUp(double value) {
+        float rounded = (float) value;
+        return rounded < value ? Math.nextUp(rounded) : rounded;
+    }
+
+    /**
+     * This heightfield with or without block bounds, sharing its heights and materials. With them (the default),
+     * raycasts skip whole blocks of cells they pass above or below: on a 1024 x 1024 map, long rays are 2.7 to 5.7
+     * times faster and rays grazing the ground 2 times; on a tile of 64 x 64 cells, short and long rays are 1.1 to 1.4
+     * times faster. Without them, raycasts walk every cell under the ray, which is about 10% faster for rays grazing a
+     * small tile, and the heightfield needs a third less memory. See {@code HeightfieldRayBenchmark}.
+     */
+    public HeightfieldShape withBlockBounds(boolean blocks) {
+        return blocks == hasBlockBounds() ? this
+            : new HeightfieldShape(samplesX, samplesZ, cellSizeX, cellSizeZ, heights, materials, blocks);
+    }
+
+    /** Whether raycasts skip blocks of cells by their height bounds; see {@link #withBlockBounds(boolean)}. */
+    public boolean hasBlockBounds() {
+        return blocks;
+    }
+
+    /** Levels of block bounds above the cells; on the top level, one block covers the whole grid. */
+    int blockLevels() {
+        return blockBounds.length - 1;
+    }
+
+    /** Blocks along x on a level: 2^level cells each, the last one possibly fewer. Level 0 is the cells. */
+    int blocksX(int level) {
+        return ((samplesX - 2) >> level) + 1;
+    }
+
+    /** Blocks along z on a level: 2^level cells each, the last one possibly fewer. Level 0 is the cells. */
+    int blocksZ(int level) {
+        return ((samplesZ - 2) >> level) + 1;
+    }
+
+    /** A lower bound of the heights in block (bx, bz) of a level from 1 up. */
+    double blockMin(int level, int bx, int bz) {
+        return blockBounds[level][2 * (bz * blocksX(level) + bx)];
+    }
+
+    /** An upper bound of the heights in block (bx, bz) of a level from 1 up. */
+    double blockMax(int level, int bx, int bz) {
+        return blockBounds[level][2 * (bz * blocksX(level) + bx) + 1];
     }
 
     /** A heightfield with material id 0 in every cell. */
@@ -75,7 +177,7 @@ public final class HeightfieldShape implements ConcaveShape {
             }
         }
         return new HeightfieldShape(samplesX, samplesZ, cellSizeX, cellSizeZ,
-            Arrays.copyOf(heights, heights.length), Arrays.copyOf(materials, materials.length));
+            Arrays.copyOf(heights, heights.length), Arrays.copyOf(materials, materials.length), true);
     }
 
     public int samplesX() {

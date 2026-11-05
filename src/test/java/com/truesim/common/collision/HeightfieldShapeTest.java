@@ -7,6 +7,7 @@ import com.truesim.common.math.Vec3;
 import com.truesim.common.math.geometry.Aabb;
 import com.truesim.common.math.geometry.Triangle;
 import com.truesim.common.math.random.Rng;
+import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
@@ -92,6 +93,59 @@ class HeightfieldShapeTest {
         int count = field.queryAabb(box, triangle -> found.add(triangle));
         assertThat(found).as("box %s", box).isEqualTo(expected);
         assertThat(count).isEqualTo(expected.size());
+    }
+
+    @Test
+    void blockBoundsHoldTheHeightsOfTheirCells() {
+        for (HeightfieldShape field : List.of(hills(1, 1), hills(1, 5), hills(20, 16), hills(37, 9), hills(64, 64))) {
+            int top = field.blockLevels();
+            assertThat(field.blocksX(top)).isEqualTo(1);
+            assertThat(field.blocksZ(top)).isEqualTo(1);
+            assertThat(field.blocksX(0)).isEqualTo(field.cellsX());
+            for (int level = 1; level <= top; level++) {
+                assertThat(field.blocksX(level - 1) > 1 || field.blocksZ(level - 1) > 1).isTrue();
+                int size = 1 << level;
+                for (int bz = 0; bz < field.blocksZ(level); bz++) {
+                    for (int bx = 0; bx < field.blocksX(level); bx++) {
+                        double min = Double.POSITIVE_INFINITY;
+                        double max = Double.NEGATIVE_INFINITY;
+                        for (int z = bz * size; z <= Math.min((bz + 1) * size, field.cellsZ()); z++) {
+                            for (int x = bx * size; x <= Math.min((bx + 1) * size, field.cellsX()); x++) {
+                                min = Math.min(min, field.height(x, z));
+                                max = Math.max(max, field.height(x, z));
+                            }
+                        }
+                        // Outwards to the next float at most.
+                        assertThat(field.blockMin(level, bx, bz)).isLessThanOrEqualTo(min)
+                            .isGreaterThanOrEqualTo(Math.nextDown((float) min));
+                        assertThat(field.blockMax(level, bx, bz)).isGreaterThanOrEqualTo(max)
+                            .isLessThanOrEqualTo(Math.nextUp((float) max));
+                    }
+                }
+            }
+        }
+        assertThat(hills(1, 1).blockLevels()).isZero();
+        assertThat(hills(64, 64).blockLevels()).isEqualTo(6);
+        assertThat(hills(37, 9).blockLevels()).isEqualTo(6);
+        // Exactly representable heights stay as they are.
+        HeightfieldShape steps = HeightfieldShape.of(3, 2, 1, 1, new double[] {0.5, 1, 2, -4, 0.25, 8});
+        assertThat(steps.blockMin(1, 0, 0)).isEqualTo(-4);
+        assertThat(steps.blockMax(1, 0, 0)).isEqualTo(8);
+    }
+
+    @Test
+    void blockBoundsCanBeLeftOut() {
+        HeightfieldShape field = hills(20, 16);
+        assertThat(field.hasBlockBounds()).isTrue();
+        assertThat(field.withBlockBounds(true)).isSameAs(field);
+        HeightfieldShape walked = field.withBlockBounds(false);
+        assertThat(walked.hasBlockBounds()).isFalse();
+        assertThat(walked.blockLevels()).isZero();
+        assertThat(walked.withBlockBounds(false)).isSameAs(walked);
+        assertThat(walked.withBlockBounds(true).blockLevels()).isEqualTo(field.blockLevels());
+        assertThat(walked.height(3, 4)).isEqualTo(field.height(3, 4));
+        assertThat(walked.cellMaterial(3, 4)).isEqualTo(field.cellMaterial(3, 4));
+        assertThat(walked.localBounds()).isEqualTo(field.localBounds());
     }
 
     @Test

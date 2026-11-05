@@ -308,6 +308,60 @@ class RayCasterTest {
         assertThat(cast(flat, Transform.IDENTITY, Vec3.of(1, 5, 1), Vec3.of(0, -1, 0), 2)).isFalse();
     }
 
+    /** A field with one tall spike: blocks around it overlap high rays, the rest of the field does not. */
+    private static HeightfieldShape spiked(int cells, int spikeX, int spikeZ) {
+        double[] heights = new double[(cells + 1) * (cells + 1)];
+        for (int i = 0; i < heights.length; i++) {
+            heights[i] = 0.1 * (i % 7);
+        }
+        heights[spikeZ * (cells + 1) + spikeX] = 20;
+        return HeightfieldShape.of(cells + 1, cells + 1, 1, 1, heights);
+    }
+
+    @Test
+    void heightfieldBlocksSkipOnlyWhatTheRayPassesBy() {
+        RaycastHit cells = new RaycastHit();
+        List<HeightfieldShape> fields = List.of(HeightfieldShapeTest.hills(24, 18), HeightfieldShapeTest.hills(1, 5),
+            HeightfieldShapeTest.hills(37, 9), HeightfieldRayBenchmark.terrain(64, 0.5, 4, 1), spiked(33, 17, 9),
+            spiked(16, 0, 16));
+        Rng rng = Rng.seeded(17);
+        int hits = 0;
+        for (HeightfieldShape field : fields) {
+            HeightfieldShape walked = field.withBlockBounds(false);
+            assertThat(field.hasBlockBounds()).isTrue();
+            assertThat(walked.hasBlockBounds()).isFalse();
+            double sizeX = field.cellsX() * field.cellSizeX();
+            double sizeZ = field.cellsZ() * field.cellSizeZ();
+            double low = field.localBounds().min().y();
+            double high = field.localBounds().max().y();
+            boolean small = field.triangleCount() <= 2000;
+            for (int i = 0; i < 2000; i++) {
+                Vec3 origin = Vec3.of(rng.nextDouble(-0.2, 1.2) * sizeX, rng.nextDouble(low - 1, high + 1),
+                    rng.nextDouble(-0.2, 1.2) * sizeZ);
+                double grade = i % 3 == 0 ? rng.nextDouble(-0.05, 0.05) : rng.nextDouble(-1, 1);
+                Vec3 direction = switch (i % 6) {
+                    case 0 -> Vec3.of(rng.nextDouble(-1, 1), grade, 0); // along x
+                    case 1 -> Vec3.of(0, grade, rng.nextDouble(-1, 1)); // along z
+                    case 2 -> Vec3.of(0, -1, 0); // straight down
+                    default -> Vec3.of(rng.nextDouble(-1, 1), grade, rng.nextDouble(-1, 1));
+                };
+                double max = i % 5 == 0 ? rng.nextDouble(0, 4) : 1e3;
+                boolean found = caster.cast(field, Transform.IDENTITY, origin, direction, max, hit);
+                boolean foundByCells = caster.cast(walked, Transform.IDENTITY, origin, direction, max, cells);
+                assertThat(found).as("%s along %s", origin, direction).isEqualTo(foundByCells);
+                if (found) {
+                    hits++;
+                    assertThat(hit.distance()).isEqualTo(cells.distance());
+                    assertThat(hit.triangle()).isEqualTo(cells.triangle());
+                }
+                if (small) {
+                    assertMatchesBruteForce(field, Transform.IDENTITY, origin, direction, max);
+                }
+            }
+        }
+        assertThat(hits).isGreaterThan(1500);
+    }
+
     private void assertMatchesBruteForce(ConcaveShape shape, Transform pose, Vec3 origin, Vec3 direction, double max) {
         double best = Double.POSITIVE_INFINITY;
         int bestTriangle = -1;

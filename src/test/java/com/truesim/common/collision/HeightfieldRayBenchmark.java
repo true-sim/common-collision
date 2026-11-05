@@ -143,18 +143,23 @@ class HeightfieldRayBenchmark {
         for (HeightfieldShape field : new HeightfieldShape[] {tile, map}) {
             for (String kind : kinds) {
                 double[] rays = rays(kind, field, kind.hashCode());
+                for (boolean blocks : new boolean[] {false, true}) {
+                HeightfieldShape walked = field.withBlockBounds(blocks);
                 RayCaster caster = new RayCaster();
                 RaycastHit hit = new RaycastHit();
                 double[] samples = new double[ROUNDS];
                 int hits = 0;
+                double distances = 0;
                 for (int round = -WARMUP; round < ROUNDS; round++) {
                     hits = 0;
+                    distances = 0;
                     long t0 = System.nanoTime();
                     for (int i = 0; i < RAYS; i++) {
                         int r = 7 * i;
-                        if (caster.cast(field, Transform.IDENTITY, rays[r], rays[r + 1], rays[r + 2], rays[r + 3],
+                        if (caster.cast(walked, Transform.IDENTITY, rays[r], rays[r + 1], rays[r + 2], rays[r + 3],
                             rays[r + 4], rays[r + 5], rays[r + 6], hit)) {
                             hits++;
+                            distances += hit.distance();
                         }
                     }
                     long t1 = System.nanoTime();
@@ -163,8 +168,11 @@ class HeightfieldRayBenchmark {
                     }
                 }
                 Arrays.sort(samples);
-                System.out.printf(Locale.ROOT, "%4d x %-4d cells, %-17s: %8.0f ns per ray (best %.0f), %4.0f%% hit%n",
-                    field.cellsX(), field.cellsZ(), kind, samples[ROUNDS / 2], samples[0], 100.0 * hits / RAYS);
+                System.out.printf(Locale.ROOT,
+                    "%4d x %-4d cells, %-17s, %-6s: %8.0f ns per ray (best %.0f), %4.0f%% hit, distances %.9e%n",
+                    field.cellsX(), field.cellsZ(), kind, blocks ? "blocks" : "cells", samples[ROUNDS / 2], samples[0],
+                    100.0 * hits / RAYS, distances);
+                }
             }
         }
     }
