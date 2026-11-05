@@ -17,11 +17,6 @@ class ShapeCastTest {
     private static final double EPS = 1e-9;
     /** How exactly casts touch the target. */
     private static final double TOUCH = 1e-9;
-    /**
-     * How close the two touching points are at contact on a smooth core without a margin (a non-uniformly scaled
-     * sphere or capsule). At contact the points come from EPA, whose polytope face is a chord of the curved surface.
-     */
-    private static final double SMOOTH_CORE_POINTS = 1e-5;
 
     private final NarrowPhase narrow = new NarrowPhase();
     private final NarrowPhase check = new NarrowPhase();
@@ -55,11 +50,6 @@ class ShapeCastTest {
         return nearest;
     }
 
-    private static boolean isSmoothCore(ConvexShape shape, Transform pose) {
-        Vec3 scale = pose.scale();
-        return shape.margin() > 0 && !(scale.x() == scale.y() && scale.y() == scale.z());
-    }
-
     /**
      * Checks a cast against sampled distances: on a hit the shape touches the target there and nowhere before, and
      * the hit's points touch and its normal separates; on a miss the shape stays clear of the target all the way.
@@ -80,8 +70,7 @@ class ShapeCastTest {
         assertThat(hit.distance()).isBetween(0.0, max);
         // Touching the target, up to rounding.
         assertThat(distanceAt(shape, pose, direction, hit.distance(), target, targetPose)).isBetween(-TOUCH, TOUCH);
-        boolean smooth = isSmoothCore(shape, pose) || target instanceof ConvexShape convex && isSmoothCore(convex, targetPose);
-        assertThat(hit.point().sub(hit.shapePoint()).length()).isLessThanOrEqualTo(smooth ? SMOOTH_CORE_POINTS : TOUCH);
+        assertThat(hit.point().sub(hit.shapePoint()).length()).isLessThanOrEqualTo(TOUCH);
         assertThat(hit.normal().length()).isCloseTo(1, within(EPS));
         // Moving a little along the normal from the impact separates the shapes, unless the normal is a smoothed one.
         if (hit.triangle() == ShapeCastHit.NONE) {

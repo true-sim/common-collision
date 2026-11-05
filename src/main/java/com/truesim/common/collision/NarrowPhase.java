@@ -13,7 +13,8 @@ import java.util.List;
  *
  * <p>GJK finds the distance between the shapes' cores (points, segments, boxes, hulls); round shapes add their
  * margin on top, which is exact. When the cores overlap, EPA finds the core penetration and the margins are added
- * again. All working storage is preallocated: reuse one instance per thread and queries allocate nothing. Not
+ * again. On smooth cores (non-uniformly scaled spheres and capsules) {@code SmoothPenetration} refines both answers to
+ * the exact one. All working storage is preallocated: reuse one instance per thread and queries allocate nothing. Not
  * thread-safe.
  *
  * <pre>{@code
@@ -41,6 +42,8 @@ public final class NarrowPhase {
     private static final double CORE_EPSILON = 1e-10;
     private static final double RELATIVE_TOLERANCE = 1e-12;
     private static final double EPA_TOLERANCE = 1e-10;
+    /** EPA tolerance on smooth cores, relative to their size; the refinement does the rest. */
+    private static final double SMOOTH_EPA_TOLERANCE = 1e-6;
     private static final double INDEPENDENCE_EPSILON = 1e-10;
 
     /** Directions tried, in order, to grow a degenerate simplex into a tetrahedron. */
@@ -60,6 +63,8 @@ public final class NarrowPhase {
     private final double[] w = new double[12];
     private final double[] a = new double[12];
     private final double[] b = new double[12];
+    /** The directions the simplex points were found in, for the smooth-core refinement. */
+    private final double[] dir = new double[12];
     private final double[] lambda = new double[4];
     private int count;
     private double vx;
@@ -75,6 +80,9 @@ public final class NarrowPhase {
     private final double[] ew;
     private final double[] ea;
     private final double[] eb;
+    private final double[] edir;
+    private final double[] faceDirections = new double[9];
+    private final SmoothPenetration smooth;
     private int vertexCount;
     private final int[] faces;
     private final double[] faceNormals;
@@ -97,6 +105,8 @@ public final class NarrowPhase {
         ew = new double[3 * maxVertices];
         ea = new double[3 * maxVertices];
         eb = new double[3 * maxVertices];
+        edir = new double[3 * maxVertices];
+        smooth = new SmoothPenetration(poseA, poseB, maxIterations);
         faces = new int[3 * maxFaces];
         faceNormals = new double[3 * maxFaces];
         faceDistances = new double[maxFaces];
@@ -133,6 +143,15 @@ public final class NarrowPhase {
             closestPoints();
             // v = a - b, so the normal from A to B is -v.
             write(contact, -vx * invCore, -vy * invCore, -vz * invCore, core);
+            if (poseA.smooth() || poseB.smooth()) {
+                // GJK only converges linearly on smooth cores: the same refinement as for penetration makes it exact.
+                System.arraycopy(dir, 0, faceDirections, 0, 3 * count);
+                double size = 0;
+                for (int i = 0; i < 3 * count; i++) {
+                    size = Math.max(size, Math.abs(w[i]));
+                }
+                refine(contact, count, size);
+            }
             return contact.distance;
         }
         return penetration(contact);
@@ -671,6 +690,9 @@ public final class NarrowPhase {
     /** Adds the Minkowski difference support point in direction d as simplex vertex {@code count}. */
     private void addSupport(double dx, double dy, double dz) {
         int i = 3 * count;
+        dir[i] = dx;
+        dir[i + 1] = dy;
+        dir[i + 2] = dz;
         poseA.coreSupport(dx, dy, dz, a, i);
         poseB.coreSupport(-dx, -dy, -dz, b, i);
         w[i] = a[i] - b[i];
@@ -699,6 +721,7 @@ public final class NarrowPhase {
                 System.arraycopy(w, 3 * i, w, 3 * kept, 3);
                 System.arraycopy(a, 3 * i, a, 3 * kept, 3);
                 System.arraycopy(b, 3 * i, b, 3 * kept, 3);
+                System.arraycopy(dir, 3 * i, dir, 3 * kept, 3);
                 lambda[kept] = l;
                 vx += l * w[3 * kept];
                 vy += l * w[3 * kept + 1];
@@ -859,6 +882,7 @@ public final class NarrowPhase {
             ew[i] = w[i];
             ea[i] = a[i];
             eb[i] = b[i];
+            edir[i] = dir[i];
         }
         vertexCount = count;
         for (int d = 0; d < DIRECTIONS.length && vertexCount < 4; d += 3) {
@@ -869,6 +893,10 @@ public final class NarrowPhase {
         }
         initialFaces();
         int best = -1;
+        boolean smoothCores = poseA.smooth() || poseB.smooth();
+        // On smooth cores flat faces only approach the surface, and the refinement makes the result exact: EPA only
+        // needs to find the right region, to a tolerance relative to the cores' size.
+        double tolerance = smoothCores ? SMOOTH_EPA_TOLERANCE * size(4) : EPA_TOLERANCE;
         for (int iteration = 0; iteration < maxIterations; iteration++) {
             best = closestFace();
             int n = 3 * best;
@@ -881,16 +909,61 @@ public final class NarrowPhase {
             int v = addVertex(nx, ny, nz);
             int p = 3 * v;
             double gap = nx * ew[p] + ny * ew[p + 1] + nz * ew[p + 2] - faceDistances[best];
-            if (gap <= EPA_TOLERANCE || !expand(v)) {
+            if (gap <= tolerance || !expand(v)) {
                 break;
             }
         }
-        return finish(best, contact);
+        finish(best, contact);
+        if (smoothCores) {
+            for (int corner = 0; corner < 3; corner++) {
+                System.arraycopy(edir, 3 * faces[3 * best + corner], faceDirections, 3 * corner, 3);
+            }
+            refine(contact, 3, size(4));
+        }
+        return contact.distance;
+    }
+
+    /** The largest coordinate of the first polytope vertices: the scale of the cores' difference. */
+    private double size(int vertices) {
+        double size = 0;
+        for (int i = 0; i < 3 * vertices; i++) {
+            size = Math.max(size, Math.abs(ew[i]));
+        }
+        return size;
+    }
+
+    /**
+     * Replaces EPA's answer on smooth cores by the exact one ({@link SmoothPenetration}), starting from the contact's
+     * normal n and the directions in {@link #faceDirections}. The cores penetrate by at most h(n), the reach of
+     * their difference along n, so a refined depth must not be larger; if it is, or the refinement gives up, EPA's
+     * (or GJK's) answer stands.
+     */
+    private void refine(Contact contact, int directions, double size) {
+        double nx = contact.normalX;
+        double ny = contact.normalY;
+        double nz = contact.normalZ;
+        double reach = differenceSupport(nx, ny, nz);
+        if (smooth.refine(nx, ny, nz, faceDirections, directions)) {
+            double depth = smooth.normalX * (smooth.ax - smooth.bx) + smooth.normalY * (smooth.ay - smooth.by)
+                + smooth.normalZ * (smooth.az - smooth.bz);
+            if (depth <= reach + RELATIVE_TOLERANCE * size) {
+                pax = smooth.ax;
+                pay = smooth.ay;
+                paz = smooth.az;
+                pbx = smooth.bx;
+                pby = smooth.by;
+                pbz = smooth.bz;
+                write(contact, smooth.normalX, smooth.normalY, smooth.normalZ, -depth);
+            }
+        }
     }
 
     private void addIfIndependent(double dx, double dy, double dz) {
         int v = vertexCount;
         int p = 3 * v;
+        edir[p] = dx;
+        edir[p + 1] = dy;
+        edir[p + 2] = dz;
         poseA.coreSupport(dx, dy, dz, ea, p);
         poseB.coreSupport(-dx, -dy, -dz, eb, p);
         ew[p] = ea[p] - eb[p];
@@ -973,6 +1046,12 @@ public final class NarrowPhase {
         }
         double length = Math.sqrt(nx * nx + ny * ny + nz * nz);
         write(contact, nx / length, ny / length, nz / length, 0);
+        if (poseA.smooth() || poseB.smooth()) {
+            faceDirections[0] = contact.normalX;
+            faceDirections[1] = contact.normalY;
+            faceDirections[2] = contact.normalZ;
+            refine(contact, 1, size(vertexCount));
+        }
         return contact.distance;
     }
 
@@ -987,6 +1066,9 @@ public final class NarrowPhase {
     private int addVertex(double nx, double ny, double nz) {
         int v = vertexCount++;
         int p = 3 * v;
+        edir[p] = nx;
+        edir[p + 1] = ny;
+        edir[p + 2] = nz;
         poseA.coreSupport(nx, ny, nz, ea, p);
         poseB.coreSupport(-nx, -ny, -nz, eb, p);
         ew[p] = ea[p] - eb[p];

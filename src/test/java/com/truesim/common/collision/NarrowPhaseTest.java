@@ -207,10 +207,11 @@ class NarrowPhaseTest {
     @Test
     void nearlyTouchingSmoothCores() {
         // Non-uniformly scaled spheres and capsules have smooth cores without a margin, on which GJK converges
-        // slowly. Distances near contact were off by 1e-7 (on a 20 m floor) to 1e-4 (on a 20 km one).
-        assertGapsAboveFloor(new SphereShape(0.6), Vec3.of(1.5, 0.7, 1), 10, 1e-13);
-        assertGapsAboveFloor(new CapsuleShape(0.8, 0.3), Vec3.of(1.5, 0.7, 1), 10, 1e-13);
-        assertGapsAboveFloor(new SphereShape(0.6), Vec3.of(1.5, 0.7, 1), 1e4, 1e-10);
+        // slowly. Distances near contact were off by 1e-7 (on a 20 m floor) to 1e-4 (on a 20 km one); Newton's method
+        // on the support function now makes them exact.
+        assertGapsAboveFloor(new SphereShape(0.6), Vec3.of(1.5, 0.7, 1), 10, 1e-15);
+        assertGapsAboveFloor(new CapsuleShape(0.8, 0.3), Vec3.of(1.5, 0.7, 1), 10, 1e-15);
+        assertGapsAboveFloor(new SphereShape(0.6), Vec3.of(1.5, 0.7, 1), 1e4, 1e-15);
     }
 
     // ---------------------------------------------------------------- boxes

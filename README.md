@@ -61,6 +61,11 @@ intersected exactly in local space, convex hulls by conservative advancement, me
 BVH and heightfields by walking the cells under the ray. A ray starting inside a convex shape hits
 at distance 0; triangles are hit from both sides, with the normal facing the ray.
 
+Heightfield rays skip whole blocks of cells they pass above or below, by the height bounds of
+blocks of 2, 4, 8 ... cells: on a 1024 x 1024 map long rays are 3 to 6 times faster. Rays grazing a
+small tile are about 10% faster without them: `field.withBlockBounds(false)`, which also saves a
+third of the memory (`HeightfieldRayBenchmark`, run with `TRUESIM_BENCHMARK=true`).
+
 ## Shape casts
 
 ```java
@@ -166,6 +171,10 @@ supported: a scaled sphere is an ellipsoid.
   shapes). GJK computes the distance between the cores and the margins are added back, which is
   exact for spheres and capsules and converges in a few iterations.
 - When the cores overlap, EPA finds the penetration depth and normal.
+- A non-uniformly scaled sphere or capsule has a smooth core (an ellipsoid, or a segment plus one),
+  which EPA's flat faces and GJK's linear convergence only approach. Newton's method on the
+  support function of the cores' difference then makes depth, normal, points and distances exact to
+  rounding, switching between the vertices, edges and faces of the sharp parts it rests on.
 - `Contact` reports the signed distance (negative when penetrating), the unit normal from A to B
   and a point on each surface.
 - All working memory is preallocated in `NarrowPhase`; queries allocate nothing. The thin query

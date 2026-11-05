@@ -39,6 +39,8 @@ public final class RayCaster {
     private static final double MISS = Double.POSITIVE_INFINITY;
     private static final double HULL_TOLERANCE = 1e-9;
     private static final int HULL_STEPS = 64;
+    /** Cells in a row a heightfield ray passes above or below before it looks at larger blocks. */
+    private static final int CLIMB_AFTER = 2;
 
     private final int hullSteps;
 
@@ -358,7 +360,12 @@ public final class RayCaster {
         return true;
     }
 
-    /** Walks the cells under the ray front to back (a 2D DDA over x and z); the first cell with a hit has the nearest. */
+    /**
+     * Walks the cells under the ray front to back (a 2D DDA over x and z); the first cell with a hit has the nearest.
+     * Where the ray passes {@value #CLIMB_AFTER} cells in a row above or below their heights, it climbs to the largest
+     * block of cells it has just entered (see {@link HeightfieldShape#blockLevels()}) and skips blocks whole the same
+     * way, going down a level into a block whose heights it passes through, and back to cells at the bottom.
+     */
     private boolean heightfield(HeightfieldShape field, double ox, double oy, double oz, double dx, double dy,
         double dz, double max) {
         double sx = field.cellSizeX();
@@ -377,45 +384,103 @@ public final class RayCaster {
         }
         int x = Math.max(0, Math.min(cellsX - 1, (int) Math.floor((ox + t * dx) / sx)));
         int z = Math.max(0, Math.min(cellsZ - 1, (int) Math.floor((oz + t * dz) / sz)));
+        double inverseX = 1 / dx;
+        double inverseZ = 1 / dz;
+        double inverseSizeX = 1 / sx;
+        double inverseSizeZ = 1 / sz;
+        int top = field.blockLevels();
+        int level = 0;
         int stepX = dx > 0 ? 1 : -1;
         int stepZ = dz > 0 ? 1 : -1;
-        double nextX = dx == 0 ? MISS : ((x + (dx > 0 ? 1 : 0)) * sx - ox) / dx;
-        double nextZ = dz == 0 ? MISS : ((z + (dz > 0 ? 1 : 0)) * sz - oz) / dz;
-        double deltaX = sx / Math.abs(dx);
-        double deltaZ = sz / Math.abs(dz);
+        double deltaX = sx * Math.abs(inverseX);
+        double deltaZ = sz * Math.abs(inverseZ);
         while (true) {
-            double exit = Math.min(end, Math.min(nextX, nextZ));
-            double y0 = oy + t * dy;
-            double y1 = oy + exit * dy;
-            double h00 = field.height(x, z);
-            double h10 = field.height(x + 1, z);
-            double h01 = field.height(x, z + 1);
-            double h11 = field.height(x + 1, z + 1);
-            // Skip cells the ray passes entirely above or below.
-            if (Math.max(y0, y1) >= Math.min(Math.min(h00, h10), Math.min(h01, h11))
-                && Math.min(y0, y1) <= Math.max(Math.max(h00, h10), Math.max(h01, h11))) {
-                int first = 2 * (z * cellsX + x);
-                double t0 = triangle(field, first, ox, oy, oz, dx, dy, dz);
-                double t1 = triangle(field, first + 1, ox, oy, oz, dx, dy, dz);
-                double hit = Math.min(t0, t1);
-                if (hit != MISS && hit <= max) {
-                    return triangleHit(field, t0 <= t1 ? first : first + 1, hit, dx, dy, dz);
+            int fromX = x;
+            int fromZ = z;
+            boolean skipped;
+            if (level == 0) {
+                // Cells front to back (a 2D DDA over x and z) while the ray runs through their heights.
+                double nextX = dx > 0 ? ((x + 1) * sx - ox) * inverseX : dx < 0 ? (x * sx - ox) * inverseX : MISS;
+                double nextZ = dz > 0 ? ((z + 1) * sz - oz) * inverseZ : dz < 0 ? (z * sz - oz) * inverseZ : MISS;
+                int run = 0;
+                do {
+                    double exit = Math.min(end, Math.min(nextX, nextZ));
+                    double y0 = oy + t * dy;
+                    double y1 = oy + exit * dy;
+                    double h00 = field.height(x, z);
+                    double h10 = field.height(x + 1, z);
+                    double h01 = field.height(x, z + 1);
+                    double h11 = field.height(x + 1, z + 1);
+                    skipped = Math.max(y0, y1) < Math.min(Math.min(h00, h10), Math.min(h01, h11))
+                        || Math.min(y0, y1) > Math.max(Math.max(h00, h10), Math.max(h01, h11));
+                    run = skipped ? run + 1 : 0;
+                    if (!skipped) {
+                        int first = 2 * (z * cellsX + x);
+                        double t0 = triangle(field, first, ox, oy, oz, dx, dy, dz);
+                        double t1 = triangle(field, first + 1, ox, oy, oz, dx, dy, dz);
+                        double hit = Math.min(t0, t1);
+                        if (hit != MISS && hit <= max) {
+                            return triangleHit(field, t0 <= t1 ? first : first + 1, hit, dx, dy, dz);
+                        }
+                    }
+                    if (exit >= end) {
+                        return false;
+                    }
+                    fromX = x;
+                    fromZ = z;
+                    if (nextX < nextZ) {
+                        x += stepX;
+                        t = nextX;
+                        nextX += deltaX;
+                    } else {
+                        z += stepZ;
+                        t = nextZ;
+                        nextZ += deltaZ;
+                    }
+                    if (x < 0 || x >= cellsX || z < 0 || z >= cellsZ) {
+                        return false;
+                    }
+                } while (run < CLIMB_AFTER || top == 0);
+            } else {
+                // The block of this level holding cell (x, z): cells [x0, x1) by [z0, z1).
+                int x0 = x >> level << level;
+                int z0 = z >> level << level;
+                int x1 = Math.min(cellsX, x0 + (1 << level));
+                int z1 = Math.min(cellsZ, z0 + (1 << level));
+                double exitX = dx > 0 ? (x1 * sx - ox) * inverseX : dx < 0 ? (x0 * sx - ox) * inverseX : MISS;
+                double exitZ = dz > 0 ? (z1 * sz - oz) * inverseZ : dz < 0 ? (z0 * sz - oz) * inverseZ : MISS;
+                double exit = Math.min(end, Math.min(exitX, exitZ));
+                double y0 = oy + t * dy;
+                double y1 = oy + exit * dy;
+                int bx = x >> level;
+                int bz = z >> level;
+                if (Math.max(y0, y1) >= field.blockMin(level, bx, bz)
+                    && Math.min(y0, y1) <= field.blockMax(level, bx, bz)) {
+                    level--; // the ray may touch something in this block: look at its quarters
+                    continue;
+                }
+                if (exit >= end) {
+                    return false;
+                }
+                // Skipped: into the neighboring block through the face the ray leaves by, at the cell the ray is in
+                // along the other axis then, kept inside the block it leaves.
+                if (exitX < exitZ) {
+                    x = dx > 0 ? x1 : x0 - 1;
+                    z = Math.max(z0, Math.min(z1 - 1, (int) Math.floor((oz + exitX * dz) * inverseSizeZ)));
+                    t = exitX;
+                } else {
+                    z = dz > 0 ? z1 : z0 - 1;
+                    x = Math.max(x0, Math.min(x1 - 1, (int) Math.floor((ox + exitZ * dx) * inverseSizeX)));
+                    t = exitZ;
+                }
+                if (x < 0 || x >= cellsX || z < 0 || z >= cellsZ) {
+                    return false;
                 }
             }
-            if (exit >= end) {
-                return false;
-            }
-            if (nextX < nextZ) {
-                x += stepX;
-                t = nextX;
-                nextX += deltaX;
-            } else {
-                z += stepZ;
-                t = nextZ;
-                nextZ += deltaZ;
-            }
-            if (x < 0 || x >= cellsX || z < 0 || z >= cellsZ) {
-                return false;
+            // After skipping a block or cell, climb to the largest block just entered; the blocks the ray stays in were
+            // found to overlap. (The top block holds every cell, so the climb ends there.)
+            while (((x ^ fromX) >> (level + 1) != 0 || (z ^ fromZ) >> (level + 1) != 0)) {
+                level++;
             }
         }
     }
