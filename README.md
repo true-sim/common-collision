@@ -193,3 +193,7 @@ present (override with `-Ptruesim.<repo>=<path>`); otherwise they are fetched fr
 
 The build enforces platform independence, allocation-free code (checked at build time and by
 `AllocationFreeTest`) and 100% line and branch coverage.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE).
